@@ -46,6 +46,10 @@ NOTES:
    - For Vulkan shaders the 'set' parameter for 'layout' should always be 0
    - For D3D12 shaders the 'space' parameter for resource bindings should always be 0
  - Vulkan like idioms are used primarily with some D3D12 wherever it makes sense
+ - Storage buffers created with tr_create_storage_buffer are not host visible. 
+   - This was done to align the behavior on Vulkan and D3D12. Vulkan's storage 
+     buffers can be host visible, but D3D12's UAV buffers are not permitted to 
+     be host visible.
 
 COMPILING & LINKING
    In one C/C++ file that #includes this file, do this:
@@ -54,13 +58,20 @@ COMPILING & LINKING
 
 */
 
-#pragma once
+#ifndef TINY_RENDERER_VK_H
+#define TINY_RENDERER_VK_H
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(__linux__)
+    #define TINY_RENDERER_LINUX
+    #define VK_USE_PLATFORM_XCB_KHR
+    #include <X11/Xlib-xcb.h>
+#endif
 
 #if defined(_WIN32)
     #define TINY_RENDERER_MSW
@@ -89,8 +100,8 @@ namespace TINY_RENDERER_CPP_NAMESPACE {
 
 #if ! defined(TINY_RENDERER_CUSTOM_MAX)
 enum {
-    tr_max_instance_extensions       = 256,
-    tr_max_device_extensions         = 256,
+    tr_max_instance_extensions       = 1024,
+    tr_max_device_extensions         = 1024,
     tr_max_gpus                      = 4,
     tr_max_descriptors               = 32,
     tr_max_descriptor_sets           = 8,
@@ -162,16 +173,16 @@ typedef enum tr_result {
 */
 
 typedef enum tr_buffer_usage {
-    tr_buffer_usage_undefined                   = 0x00000000,
-    tr_buffer_usage_transfer_src                = 0x00000001,
-    tr_buffer_usage_transfer_dst                = 0x00000002,
-    tr_buffer_usage_uniform_texel               = 0x00000004,
-    tr_buffer_usage_storage_texel               = 0x00000008,
-    tr_buffer_usage_uniform                     = 0x00000010,
-    tr_buffer_usage_storage                     = 0x00000020,
-    tr_buffer_usage_index                       = 0x00000040,
-    tr_buffer_usage_vertex                      = 0x00000080,
-    tr_buffer_usage_indirect                    = 0x00000100,
+    tr_buffer_usage_index                       = 0x00000001,
+    tr_buffer_usage_vertex                      = 0x00000002,
+    tr_buffer_usage_indirect                    = 0x00000004,
+    tr_buffer_usage_transfer_src                = 0x00000008,
+    tr_buffer_usage_transfer_dst                = 0x00000010,
+    tr_buffer_usage_uniform_cbv                 = 0x00000020,
+    tr_buffer_usage_storage_srv                 = 0x00000040,
+    tr_buffer_usage_storage_uav                 = 0x00000080,
+    tr_buffer_usage_uniform_texel_srv           = 0x00000100,
+    tr_buffer_usage_storage_texel_uav           = 0x00000200,
 } tr_buffer_usage;
 
 typedef enum tr_texture_type {
@@ -186,13 +197,15 @@ typedef enum tr_texture_usage {
     tr_texture_usage_transfer_src               = 0x00000001,
     tr_texture_usage_transfer_dst               = 0x00000002,
     tr_texture_usage_sampled_image              = 0x00000004,
-    tr_texture_usage_storage                    = 0x00000008,
+    tr_texture_usage_storage_image              = 0x00000008,
     tr_texture_usage_color_attachment           = 0x00000010,
     tr_texture_usage_depth_stencil_attachment   = 0x00000020,
     tr_texture_usage_resolve_src                = 0x00000040,
     tr_texture_usage_resolve_dst                = 0x00000080,
     tr_texture_usage_present                    = 0x00000100,
 } tr_texture_usage;
+
+typedef uint32_t tr_texture_usage_flags;
 
 typedef enum tr_format {
     tr_format_undefined = 0,
@@ -234,8 +247,13 @@ typedef enum tr_format {
 typedef enum tr_descriptor_type {
     tr_descriptor_type_undefined = 0,
     tr_descriptor_type_sampler,
-    tr_descriptor_type_texture,
-    tr_descriptor_type_uniform_buffer,
+    tr_descriptor_type_uniform_buffer_cbv,       // CBV | VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+    tr_descriptor_type_storage_buffer_srv,       // SRV | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+    tr_descriptor_type_storage_buffer_uav,       // UAV | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+    tr_descriptor_type_uniform_texel_buffer_srv, // SRV | VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER
+    tr_descriptor_type_storage_texel_buffer_uav, // UAV | VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER
+    tr_descriptor_type_texture_srv,              // SRV | VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+    tr_descriptor_type_texture_uav,              // UAV | VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
 } tr_descriptor_type;
 
 typedef enum tr_sample_count {
@@ -247,13 +265,14 @@ typedef enum tr_sample_count {
 } tr_sample_count;
 
 typedef enum tr_shader_stage {
-    tr_shader_stage_vert         = 0x00000001,
-    tr_shader_stage_tesc         = 0x00000002,
-    tr_shader_stage_tese         = 0x00000004,
-    tr_shader_stage_geom         = 0x00000008,
-    tr_shader_stage_frag         = 0x00000010,
-    tr_shader_stage_comp         = 0x00000020,
-    tr_shader_stage_all_graphics = 0x0000001F,
+    tr_shader_stage_vert          = 0x00000001,
+    tr_shader_stage_tesc          = 0x00000002,
+    tr_shader_stage_tese          = 0x00000004,
+    tr_shader_stage_geom          = 0x00000008,
+    tr_shader_stage_frag          = 0x00000010,
+    tr_shader_stage_comp          = 0x00000020,
+    tr_shader_stage_all_graphics  = 0x0000001F,
+    tr_shader_stage_count         = 6,
 } tr_shader_stage;
 
 typedef enum tr_primitive_topo {
@@ -263,6 +282,10 @@ typedef enum tr_primitive_topo {
     tr_primitive_topo_tri_list,
     tr_primitive_topo_tri_strip,
     tr_primitive_topo_tri_fan,
+    tr_primitive_topo_1_point_patch,
+    tr_primitive_topo_2_point_patch,
+    tr_primitive_topo_3_point_patch,
+    tr_primitive_topo_4_point_patch,
 } tr_primitive_topo;
 
 typedef enum tr_index_type {
@@ -298,8 +321,19 @@ typedef enum tr_cull_mode {
 
 typedef enum tr_front_face {
     tr_front_face_ccw = 0,
-    tr_fornt_face_cw
+    tr_front_face_cw
 } tr_front_face;
+
+typedef enum tr_tessellation_domain_origin {
+    tr_tessellation_domain_origin_upper_left = 0,
+    tr_tessellation_domain_origin_lower_left = 1,
+} tr_tessellation_domain_origin;
+
+typedef enum tr_pipeline_type {
+  tr_pipeline_type_undefined = 0,
+  tr_pipeline_type_compute,
+  tr_pipeline_type_graphics
+} tr_pipeline_type;
 
 // Forward declarations
 typedef struct tr_renderer tr_renderer;
@@ -324,7 +358,10 @@ typedef struct tr_clear_value {
 } tr_clear_value;
 
 typedef struct tr_platform_handle {
-#if defined(TINY_RENDERER_MSW)
+#if defined(__linux__)
+    xcb_connection_t*                   connection;
+    xcb_window_t                        window;
+#elif defined(TINY_RENDERER_MSW)
     HINSTANCE                           hinstance;
     HWND                                hwnd;
 #endif
@@ -354,7 +391,7 @@ typedef struct tr_renderer_settings {
     // Vulkan specific options
     tr_string_list                      instance_layers;
     tr_string_list                      instance_extensions;
-    tr_string_list                      device_layers;
+    //tr_string_list                      device_layers;
     tr_string_list                      device_extensions;
     PFN_vkDebugReportCallbackEXT        vk_debug_fn;
 } tr_renderer_settings;
@@ -394,6 +431,7 @@ typedef struct tr_renderer {
     VkSurfaceKHR                        vk_surface;
     VkSwapchainKHR                      vk_swapchain;
     VkDebugReportCallbackEXT            vk_debug_report;
+    bool                                vk_device_ext_VK_AMD_negative_viewport_height;
 } tr_renderer;
 
 typedef struct tr_descriptor {
@@ -404,6 +442,7 @@ typedef struct tr_descriptor {
     tr_buffer*                          uniform_buffers[tr_max_descriptor_entries];
     tr_texture*                         textures[tr_max_descriptor_entries];
     tr_sampler*                         samplers[tr_max_descriptor_entries];
+    tr_buffer*                          buffers[tr_max_descriptor_entries];
 } tr_descriptor;
 
 typedef struct tr_descriptor_set {
@@ -431,16 +470,26 @@ typedef struct tr_buffer {
     bool                                host_visible;
     tr_index_type                       index_type;
     uint32_t                            vertex_stride;
+    tr_format                           format;
+    uint64_t                            first_element;
+    uint64_t                            element_count;
+    uint64_t                            struct_stride;
+    bool                                raw;
     void*                               cpu_mapped_address;
     VkBuffer                            vk_buffer;
     VkDeviceMemory                      vk_memory;
-    VkDescriptorBufferInfo              vk_buffer_view;
+    // Used for uniform and storage buffers
+    VkDescriptorBufferInfo              vk_buffer_info;
+    // Used for uniform texel and storage texel buffers
+    VkBufferView                        vk_buffer_view;
+    // Counter buffer
+    tr_buffer*                          counter_buffer;
 } tr_buffer;
 
 typedef struct tr_texture {
     tr_renderer*                        renderer;
     tr_texture_type                     type;
-    tr_texture_usage                    usage;
+    tr_texture_usage_flags              usage;
     uint32_t                            width;
     uint32_t                            height;
     uint32_t                            depth;
@@ -474,6 +523,12 @@ typedef struct tr_shader_program {
     VkShaderModule                      vk_geom;
     VkShaderModule                      vk_frag;
     VkShaderModule                      vk_comp;
+    const char*                         vert_entry_point;
+    const char*                         tesc_entry_point;
+    const char*                         tese_entry_point;
+    const char*                         geom_entry_point;
+    const char*                         frag_entry_point;
+    const char*                         comp_entry_point;
 } tr_shader_program;
 
 typedef struct tr_vertex_attrib {
@@ -495,13 +550,14 @@ typedef struct tr_pipeline_settings {
     tr_primitive_topo                   primitive_topo;
     tr_cull_mode                        cull_mode;
     tr_front_face                       front_face;
-    bool                                depth_test;
-    bool                                depth_write;
+    bool                                depth;
+    tr_tessellation_domain_origin       tessellation_domain_origin;
 } tr_pipeline_settings;
 
 typedef struct tr_pipeline {
     tr_renderer*                        renderer;
     tr_pipeline_settings                settings;
+    tr_pipeline_type                    type;
     VkPipelineLayout                    vk_pipeline_layout;
     VkPipeline                          vk_pipeline;
 } tr_pipeline;
@@ -517,6 +573,7 @@ typedef struct tr_render_target {
     tr_texture*                         color_attachments_multisample[tr_max_render_target_attachments];
     tr_format                           depth_stencil_format;
     tr_texture*                         depth_stencil_attachment;
+    tr_texture*                         depth_stencil_attachment_multisample;
     VkRenderPass                        vk_render_pass;
     VkFramebuffer                       vk_framebuffer;
 } tr_render_target;
@@ -564,22 +621,26 @@ tr_api_export void tr_create_buffer(tr_renderer* p_renderer, tr_buffer_usage usa
 tr_api_export void tr_create_index_buffer(tr_renderer*p_renderer, uint64_t size, bool host_visible, tr_index_type index_type, tr_buffer** pp_buffer);
 tr_api_export void tr_create_uniform_buffer(tr_renderer* p_renderer, uint64_t size, bool host_visible, tr_buffer** pp_buffer);
 tr_api_export void tr_create_vertex_buffer(tr_renderer* p_renderer, uint64_t size, bool host_visible, uint32_t vertex_stride, tr_buffer** pp_buffer);
+tr_api_export void tr_create_structured_buffer(tr_renderer* p_renderer, uint64_t size, uint64_t first_element, uint64_t element_count, uint64_t struct_stride, bool raw, tr_buffer** pp_buffer);
+tr_api_export void tr_create_rw_structured_buffer(tr_renderer* p_renderer, uint64_t size, uint64_t first_element, uint64_t element_count, uint64_t struct_stride, bool raw, tr_buffer** pp_counter_buffer, tr_buffer** pp_buffer);
 tr_api_export void tr_destroy_buffer(tr_renderer* p_renderer, tr_buffer* p_buffer);
 
-tr_api_export void tr_create_texture(tr_renderer* p_renderer, tr_texture_type type, uint32_t width, uint32_t height, uint32_t depth, tr_sample_count sample_count, tr_format format, uint32_t mip_levels, const tr_clear_value* p_clear_value, bool host_visible, tr_texture_usage usage, tr_texture** pp_texture);
-tr_api_export void tr_create_texture_1d(tr_renderer* p_renderer, uint32_t width, tr_sample_count sample_count, tr_format format, bool host_visible, tr_texture_usage usage, tr_texture** pp_texture);
-tr_api_export void tr_create_texture_2d(tr_renderer* p_renderer, uint32_t width, uint32_t height, tr_sample_count sample_count, tr_format format, uint32_t mip_levels, const tr_clear_value* p_clear_value, bool host_visible, tr_texture_usage usage, tr_texture** pp_texture);
-tr_api_export void tr_create_texture_3d(tr_renderer* p_renderer, uint32_t width, uint32_t height, uint32_t depth, tr_sample_count sample_count, tr_format format, bool host_visible, tr_texture_usage usage, tr_texture** pp_texture);
+tr_api_export void tr_create_texture(tr_renderer* p_renderer, tr_texture_type type, uint32_t width, uint32_t height, uint32_t depth, tr_sample_count sample_count, tr_format format, uint32_t mip_levels, const tr_clear_value* p_clear_value, bool host_visible, tr_texture_usage_flags usage, tr_texture** pp_texture);
+tr_api_export void tr_create_texture_1d(tr_renderer* p_renderer, uint32_t width, tr_sample_count sample_count, tr_format format, bool host_visible, tr_texture_usage_flags usage, tr_texture** pp_texture);
+tr_api_export void tr_create_texture_2d(tr_renderer* p_renderer, uint32_t width, uint32_t height, tr_sample_count sample_count, tr_format format, uint32_t mip_levels, const tr_clear_value* p_clear_value, bool host_visible, tr_texture_usage_flags usage, tr_texture** pp_texture);
+tr_api_export void tr_create_texture_3d(tr_renderer* p_renderer, uint32_t width, uint32_t height, uint32_t depth, tr_sample_count sample_count, tr_format format, bool host_visible, tr_texture_usage_flags usage, tr_texture** pp_texture);
 tr_api_export void tr_destroy_texture(tr_renderer* p_renderer, tr_texture*p_texture);
 
 tr_api_export void tr_create_sampler(tr_renderer* p_renderer, tr_sampler** pp_sampler);
 tr_api_export void tr_destroy_sampler(tr_renderer* p_renderer, tr_sampler* p_sampler);
 
-tr_api_export void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, tr_shader_program** pp_shader_program);
+tr_api_export void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program** pp_shader_program);
 tr_api_export void tr_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, tr_shader_program** p_shader_program);
+tr_api_export void tr_create_shader_program_compute(tr_renderer* p_renderer, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program** pp_shader_program);
 tr_api_export void tr_destroy_shader_program(tr_renderer* p_renderer, tr_shader_program* p_shader_program);
 
 tr_api_export void tr_create_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, const tr_vertex_layout* p_vertex_layout, tr_descriptor_set* p_descriptor_set, tr_render_target* p_render_target, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline** pp_pipeline);
+tr_api_export void tr_create_compute_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, tr_descriptor_set* p_descriptor_set, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline** pp_pipeline);
 tr_api_export void tr_destroy_pipeline(tr_renderer* p_renderer, tr_pipeline* p_pipeline);
 
 tr_api_export void tr_create_render_target(tr_renderer* p_renderer, uint32_t width, uint32_t height, tr_sample_count sample_count, tr_format color_format, uint32_t color_attachment_count, const tr_clear_value* color_clear_values, tr_format depth_stencil_format, const tr_clear_value* depth_stencil_clear_value, tr_render_target** pp_render_target);
@@ -593,6 +654,9 @@ tr_api_export void tr_cmd_begin_render(tr_cmd* p_cmd, tr_render_target* p_render
 tr_api_export void tr_cmd_end_render(tr_cmd* p_cmd);
 tr_api_export void tr_cmd_set_viewport(tr_cmd* p_cmd, float x, float, float width, float height, float min_depth, float max_depth);
 tr_api_export void tr_cmd_set_scissor(tr_cmd* p_cmd, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+tr_api_export void tr_cmd_set_line_width(tr_cmd* p_cmd, float line_width);
+tr_api_export void tr_cmd_clear_color_attachment(tr_cmd* p_cmd, uint32_t attachment_index, const tr_clear_value* clear_value);
+tr_api_export void tr_cmd_clear_depth_stencil_attachment(tr_cmd* p_cmd, const tr_clear_value* clear_value);
 tr_api_export void tr_cmd_bind_pipeline(tr_cmd* p_cmd, tr_pipeline* p_pipeline);
 tr_api_export void tr_cmd_bind_descriptor_sets(tr_cmd* p_cmd, tr_pipeline* p_pipeline, tr_descriptor_set* p_descriptor_set);
 tr_api_export void tr_cmd_bind_index_buffer(tr_cmd* p_cmd, tr_buffer* p_buffer);
@@ -600,8 +664,12 @@ tr_api_export void tr_cmd_bind_vertex_buffers(tr_cmd* p_cmd, uint32_t buffer_cou
 tr_api_export void tr_cmd_draw(tr_cmd* p_cmd, uint32_t vertex_count, uint32_t first_vertex);
 tr_api_export void tr_cmd_draw_indexed(tr_cmd* p_cmd, uint32_t index_count, uint32_t first_index);
 tr_api_export void tr_cmd_draw_mesh(tr_cmd* p_cmd, const tr_mesh* p_mesh);
+tr_api_export void tr_cmd_buffer_transition(tr_cmd* p_cmd, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage);
 tr_api_export void tr_cmd_image_transition(tr_cmd* p_cmd, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage);
 tr_api_export void tr_cmd_render_target_transition(tr_cmd* p_cmd, tr_render_target* p_render_target, tr_texture_usage old_usage, tr_texture_usage new_usage);
+tr_api_export void tr_cmd_depth_stencil_transition(tr_cmd* p_cmd, tr_render_target* p_render_target, tr_texture_usage old_usage, tr_texture_usage new_usage);
+tr_api_export void tr_cmd_dispatch(tr_cmd* p_cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z);
+tr_api_export void tr_cmd_copy_buffer_to_texture2d(tr_cmd* p_cmd, uint32_t width, uint32_t height, uint32_t row_pitch, uint64_t buffer_offset, uint32_t mip_level, tr_buffer* p_buffer, tr_texture* p_texture);
 
 tr_api_export void tr_acquire_next_image(tr_renderer* p_renderer, tr_semaphore* p_signal_semaphore, tr_fence* p_fence);
 tr_api_export void tr_queue_submit(tr_queue* p_queue, uint32_t cmd_count, tr_cmd** pp_cmds, uint32_t wait_semaphore_count, tr_semaphore** pp_wait_semaphores, uint32_t signal_semaphore_count, tr_semaphore** pp_signal_semaphores);
@@ -621,7 +689,11 @@ tr_api_export tr_format          tr_util_from_vk_format(VkFormat fomat);
 tr_api_export uint32_t           tr_util_format_stride(tr_format format);
 tr_api_export uint32_t           tr_util_format_channel_count(tr_format format);
 tr_api_export VkShaderStageFlags tr_util_to_vk_shader_stages(tr_shader_stage shader_stages);
+tr_api_export void               tr_util_transition_buffer(tr_queue* p_queue, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage);
 tr_api_export void               tr_util_transition_image(tr_queue* p_queue, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage);
+tr_api_export void               tr_util_set_storage_buffer_count(tr_queue* p_queue, uint64_t count_offset, uint32_t count, tr_buffer* p_buffer);
+tr_api_export void               tr_util_clear_buffer(tr_queue* p_queue, tr_buffer* p_buffer);
+tr_api_export void               tr_util_update_buffer(tr_queue* p_queue, uint64_t size, const void* p_src_data, tr_buffer* p_buffer);
 tr_api_export void               tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_t src_height, uint32_t src_row_stride, const uint8_t* p_src_data, uint32_t src_channel_count, tr_texture* p_texture, tr_image_resize_uint8_fn resize_fn, void* p_user_data);
 tr_api_export void               tr_util_update_texture_float(tr_queue* p_queue, uint32_t src_width, uint32_t src_height, uint32_t src_row_stride, const float* p_src_data, uint32_t channels, tr_texture* p_texture, tr_image_resize_float_fn resize_fn, void* p_user_data);
 
@@ -708,10 +780,11 @@ void tr_internal_vk_destroy_texture(tr_renderer* p_renderer, tr_texture* p_textu
 void tr_internal_vk_create_sampler(tr_renderer* p_renderer, tr_sampler* p_sampler);
 void tr_internal_vk_destroy_sampler(tr_renderer* p_renderer, tr_sampler* p_sampler);
 void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, const tr_vertex_layout* p_vertex_layout, tr_descriptor_set* pp_descriptor_set, tr_render_target* p_render_target, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline* p_pipeline);
+void tr_internal_vk_create_compute_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, tr_descriptor_set* p_descriptor_set, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline* p_pipeline);
 void tr_internal_vk_destroy_pipeline(tr_renderer* p_renderer, tr_pipeline* p_pipeline);
-void tr_internal_vk_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, tr_shader_program* p_shader_program);
+void tr_internal_vk_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program* p_shader_program);
 void tr_internal_vk_destroy_shader_program(tr_renderer* p_renderer, tr_shader_program* p_shader_program);
-void tr_internal_vk_create_render_target(tr_renderer* p_renderer, tr_render_target* p_render_target);
+void tr_internal_vk_create_render_target(tr_renderer* p_renderer, bool is_swapchain, tr_render_target* p_render_target);
 void tr_internal_vk_destroy_render_target(tr_renderer* p_renderer, tr_render_target* p_render_target);
 
 // Internal descriptor set functions
@@ -724,7 +797,9 @@ void tr_internal_vk_cmd_begin_render(tr_cmd* p_cmd, tr_render_target* p_render_t
 void tr_internal_vk_cmd_end_render(tr_cmd* p_cmd);
 void tr_internal_vk_cmd_set_viewport(tr_cmd* p_cmd, float x, float, float width, float height, float min_depth, float max_depth);
 void tr_internal_vk_cmd_set_scissor(tr_cmd* p_cmd, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+void tr_internal_vk_cmd_set_line_width(tr_cmd* p_cmd, float line_width);
 void tr_cmd_internal_vk_cmd_clear_color_attachment(tr_cmd* p_cmd, uint32_t attachment_index, const tr_clear_value* clear_value);
+void tr_cmd_internal_vk_cmd_clear_depth_stencil_attachment(tr_cmd* p_cmd, const tr_clear_value* clear_value);
 void tr_internal_vk_cmd_bind_pipeline(tr_cmd* p_cmd, tr_pipeline* p_pipeline);
 void tr_internal_vk_cmd_bind_descriptor_sets(tr_cmd* p_cmd, tr_pipeline* p_pipeline, tr_descriptor_set* p_descriptor_set);
 void tr_internal_vk_cmd_bind_index_buffer(tr_cmd* p_cmd, tr_buffer* p_buffer);
@@ -732,8 +807,11 @@ void tr_internal_vk_cmd_bind_vertex_buffers(tr_cmd* p_cmd, uint32_t buffer_count
 void tr_internal_vk_cmd_draw(tr_cmd* p_cmd, uint32_t vertex_count, uint32_t first_vertex);
 void tr_internal_vk_cmd_draw_indexed(tr_cmd* p_cmd, uint32_t index_count, uint32_t first_index);
 void tr_internal_vk_cmd_draw_mesh(tr_cmd* p_cmd, const tr_mesh* p_mesh);
+void tr_internal_vk_cmd_buffer_transition(tr_cmd* p_cmd, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage);
 void tr_internal_vk_cmd_image_transition(tr_cmd* p_cmd, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage);
 void tr_internal_vk_cmd_render_target_transition(tr_cmd* p_cmd, tr_render_target* p_render_target, tr_texture_usage old_usage, tr_texture_usage new_usage);
+void tr_internal_vk_cmd_dispatch(tr_cmd* p_cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z);
+void tr_internal_vk_cmd_copy_buffer_to_texture2d(tr_cmd* p_cmd, uint32_t width, uint32_t height, uint32_t row_pitch, uint64_t buffer_offset, uint32_t mip_level, tr_buffer* p_buffer, tr_texture* p_texture);
 
 // Internal queue/swapchain functions
 void tr_internal_vk_acquire_next_image(tr_renderer* p_renderer, tr_semaphore* p_signal_semaphore, tr_fence* p_fence);
@@ -1079,47 +1157,43 @@ void tr_create_renderer(const char *app_name, const tr_renderer_settings* settin
             tr_create_semaphore(p_renderer, &(p_renderer->render_complete_semaphores[i]));
         }
 
-        // Transition the swapchain render targets to first use
-        if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
-            for (uint32_t i = 0; i < p_renderer->settings.swapchain.image_count; ++i) {
-                tr_render_target* render_target = p_renderer->swapchain_render_targets[i];
-                // Color single sample
-                tr_util_transition_image(p_renderer->graphics_queue, 
-                                         render_target->color_attachments[0], 
-                                         tr_texture_usage_undefined, 
-                                         tr_texture_usage_present );
-                // Color multi-sample
-                tr_util_transition_image(p_renderer->graphics_queue, 
-                                         render_target->color_attachments_multisample[0], 
-                                         tr_texture_usage_undefined, 
-                                         tr_texture_usage_color_attachment );
-                // Depth/stencil
-                if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
-                    tr_util_transition_image(p_renderer->graphics_queue, 
-                                             render_target->depth_stencil_attachment, 
-                                             tr_texture_usage_undefined, 
-                                             tr_texture_usage_depth_stencil_attachment );
-                }
-            }
-        }
-        else {
-            for (uint32_t i = 0; i < p_renderer->settings.swapchain.image_count; ++i) {
-                tr_render_target* render_target = p_renderer->swapchain_render_targets[i];
-                // Color
-                tr_util_transition_image(p_renderer->graphics_queue,
-                                         render_target->color_attachments[0], 
-                                         tr_texture_usage_undefined, 
-                                         tr_texture_usage_present );
-                // Depth/stencil
-                if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
-                    tr_util_transition_image(p_renderer->graphics_queue, 
-                                             render_target->depth_stencil_attachment, 
-                                             tr_texture_usage_undefined, 
-                                             tr_texture_usage_depth_stencil_attachment );
-                }
-                    
-            }
-        }
+        // No need to do this since, the render pass will take care of them
+        //
+        //// Transition the swapchain render targets to first use
+        //if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
+        //    for (uint32_t i = 0; i < p_renderer->settings.swapchain.image_count; ++i) {
+        //        tr_render_target* render_target = p_renderer->swapchain_render_targets[i];
+        //        // Color single-sample images are swapchain images and are not transitioned
+        //
+        //        // Color multi-sample
+        //        tr_util_transition_image(p_renderer->graphics_queue, 
+        //                                 render_target->color_attachments_multisample[0], 
+        //                                 tr_texture_usage_undefined, 
+        //                                 tr_texture_usage_color_attachment );
+        //        // Depth/stencil
+        //        if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
+        //            tr_util_transition_image(p_renderer->graphics_queue, 
+        //                                     render_target->depth_stencil_attachment, 
+        //                                     tr_texture_usage_undefined, 
+        //                                     tr_texture_usage_depth_stencil_attachment );
+        //        }
+        //    }
+        //}
+        //else {
+        //    for (uint32_t i = 0; i < p_renderer->settings.swapchain.image_count; ++i) {
+        //        tr_render_target* render_target = p_renderer->swapchain_render_targets[i];
+        //        // Color images are swapchain images and are not transitioned
+        //
+        //        // Depth/stencil
+        //        if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
+        //            tr_util_transition_image(p_renderer->graphics_queue, 
+        //                                     render_target->depth_stencil_attachment, 
+        //                                     tr_texture_usage_undefined, 
+        //                                     tr_texture_usage_depth_stencil_attachment );
+        //        }
+        //            
+        //    }
+        //}
 
         // Renderer is good! Assign it to result!
         *(pp_renderer) = p_renderer;
@@ -1347,7 +1421,7 @@ void tr_create_index_buffer(tr_renderer* p_renderer, uint64_t size, bool host_vi
 
 void tr_create_uniform_buffer(tr_renderer* p_renderer, uint64_t size, bool host_visible, tr_buffer** pp_buffer)
 {
-    tr_create_buffer(p_renderer, tr_buffer_usage_uniform, size, host_visible, pp_buffer);
+    tr_create_buffer(p_renderer, tr_buffer_usage_uniform_cbv, size, host_visible, pp_buffer);
 }
 
 void tr_create_vertex_buffer(tr_renderer* p_renderer, uint64_t size, bool host_visible, uint32_t vertex_stride, tr_buffer** pp_buffer)
@@ -1355,6 +1429,77 @@ void tr_create_vertex_buffer(tr_renderer* p_renderer, uint64_t size, bool host_v
     tr_create_buffer(p_renderer, tr_buffer_usage_vertex, size, host_visible, pp_buffer);
     (*pp_buffer)->vertex_stride = vertex_stride;
 }
+
+void tr_create_structured_buffer(tr_renderer* p_renderer, uint64_t size, uint64_t first_element, uint64_t element_count, uint64_t struct_stride, bool raw, tr_buffer** pp_buffer)
+{
+    TINY_RENDERER_RENDERER_PTR_CHECK(p_renderer);
+    assert(size > 0 );
+
+    tr_buffer* p_buffer = (tr_buffer*)calloc(1, sizeof(*p_buffer));
+    assert(NULL != p_buffer);
+
+    p_buffer->renderer        = p_renderer;
+    p_buffer->usage           = tr_buffer_usage_storage_srv;
+    p_buffer->size            = size;
+    p_buffer->host_visible    = false;
+    p_buffer->format          = tr_format_undefined;
+    p_buffer->first_element   = first_element;
+    p_buffer->element_count   = element_count;
+    p_buffer->struct_stride   = struct_stride;
+  
+    tr_internal_vk_create_buffer(p_renderer, p_buffer);
+
+    *pp_buffer = p_buffer;
+}
+
+void tr_create_rw_structured_buffer(tr_renderer* p_renderer, uint64_t size, uint64_t first_element, uint64_t element_count, uint64_t struct_stride, bool raw, tr_buffer** pp_counter_buffer, tr_buffer** pp_buffer)
+{
+    TINY_RENDERER_RENDERER_PTR_CHECK(p_renderer);
+    assert(size > 0 );
+
+    // Create counter buffer
+    if (pp_counter_buffer != NULL) {
+      tr_buffer* p_counter_buffer = (tr_buffer*)calloc(1, sizeof(*p_counter_buffer));
+      assert(NULL != p_counter_buffer);
+
+      p_counter_buffer->renderer        = p_renderer;
+      p_counter_buffer->usage           = tr_buffer_usage_storage_uav;
+      p_counter_buffer->size            = 4;
+      p_counter_buffer->host_visible    = false;
+      p_counter_buffer->format          = tr_format_undefined;
+      p_counter_buffer->first_element   = 0;
+      p_counter_buffer->element_count   = 1;
+      p_counter_buffer->struct_stride   = 4;
+    
+      tr_internal_vk_create_buffer(p_renderer, p_counter_buffer);
+
+      *pp_counter_buffer = p_counter_buffer;
+    }
+
+    // Create data buffer
+    {
+      tr_buffer* p_buffer = (tr_buffer*)calloc(1, sizeof(*p_buffer));
+      assert(NULL != p_buffer);
+
+      p_buffer->renderer        = p_renderer;
+      p_buffer->usage           = tr_buffer_usage_storage_uav;
+      p_buffer->size            = size;
+      p_buffer->host_visible    = false;
+      p_buffer->format          = tr_format_undefined;
+      p_buffer->first_element   = first_element;
+      p_buffer->element_count   = element_count;
+      p_buffer->struct_stride   = struct_stride;
+
+      if (pp_counter_buffer != NULL) {
+        p_buffer->counter_buffer = *pp_counter_buffer;
+      }
+    
+      tr_internal_vk_create_buffer(p_renderer, p_buffer);
+
+      *pp_buffer = p_buffer;
+    }
+}
+
 
 void tr_destroy_buffer(tr_renderer* p_renderer, tr_buffer* p_buffer)
 {
@@ -1377,7 +1522,7 @@ void tr_create_texture(
     uint32_t                 mip_levels,
     const tr_clear_value*    p_clear_value, 
     bool                     host_visible, 
-    tr_texture_usage         usage, 
+    tr_texture_usage_flags   usage, 
     tr_texture**             pp_texture
 )
 {
@@ -1418,29 +1563,29 @@ void tr_create_texture(
 }
 
 void tr_create_texture_1d(
-    tr_renderer*     p_renderer, 
-    uint32_t         width, 
-    tr_sample_count  sample_count, 
-    tr_format        format, 
-    bool             host_visible, 
-    tr_texture_usage usage, 
-    tr_texture**     pp_texture
+    tr_renderer*            p_renderer, 
+    uint32_t                width, 
+    tr_sample_count         sample_count, 
+    tr_format               format, 
+    bool                    host_visible, 
+    tr_texture_usage_flags  usage, 
+    tr_texture**            pp_texture
 )
 {
     tr_create_texture(p_renderer, tr_texture_type_1d, width, 1, 1, sample_count, format, 1, NULL, host_visible, usage, pp_texture);
 }
 
 void tr_create_texture_2d(
-    tr_renderer*             p_renderer, 
-    uint32_t                 width, 
-    uint32_t                 height, 
-    tr_sample_count          sample_count, 
-    tr_format                format,
-    uint32_t                 mip_levels,
-    const tr_clear_value*    clear_value, 
-    bool                     host_visible,
-    tr_texture_usage         usage, 
-    tr_texture**             pp_texture
+    tr_renderer*              p_renderer, 
+    uint32_t                  width, 
+    uint32_t                  height, 
+    tr_sample_count           sample_count, 
+    tr_format                 format,
+    uint32_t                  mip_levels,
+    const tr_clear_value*     clear_value, 
+    bool                      host_visible,
+    tr_texture_usage_flags    usage, 
+    tr_texture**              pp_texture
 )
 {
     if (tr_max_mip_levels == mip_levels) {
@@ -1451,15 +1596,15 @@ void tr_create_texture_2d(
 }
 
 void tr_create_texture_3d(
-    tr_renderer*     p_renderer, 
-    uint32_t         width, 
-    uint32_t         height, 
-    uint32_t         depth, 
-    tr_sample_count  sample_count, 
-    tr_format        format, 
-    bool             host_visible, 
-    tr_texture_usage usage, 
-    tr_texture**     pp_texture
+    tr_renderer*            p_renderer, 
+    uint32_t                width, 
+    uint32_t                height, 
+    uint32_t                depth, 
+    tr_sample_count         sample_count, 
+    tr_format               format, 
+    bool                    host_visible, 
+    tr_texture_usage_flags  usage, 
+    tr_texture**            pp_texture
 )
 {
     tr_create_texture(p_renderer, tr_texture_type_3d, width, height, depth, sample_count, format, 1, NULL, host_visible, usage, pp_texture);
@@ -1499,7 +1644,7 @@ void tr_destroy_sampler(tr_renderer* p_renderer, tr_sampler* p_sampler)
     TINY_RENDERER_SAFE_FREE(p_sampler);
 }
 
-void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, tr_shader_program** pp_shader_program)
+void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program** pp_shader_program)
 {
     TINY_RENDERER_RENDERER_PTR_CHECK(p_renderer);
     if (vert_size > 0) {
@@ -1517,6 +1662,9 @@ void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, con
     if (frag_size > 0) {
         assert(NULL != frag_code);
     }
+    if (comp_size > 0) {
+        assert(NULL != comp_code);
+    }
 
     tr_shader_program* p_shader_program = (tr_shader_program*)calloc(1, sizeof(*p_shader_program));
     assert(NULL != p_shader_program);
@@ -1527,15 +1675,57 @@ void tr_create_shader_program_n(tr_renderer* p_renderer, uint32_t vert_size, con
     p_shader_program->shader_stages |= (tese_size > 0) ? tr_shader_stage_tese : 0;
     p_shader_program->shader_stages |= (geom_size > 0) ? tr_shader_stage_geom : 0;
     p_shader_program->shader_stages |= (frag_size > 0) ? tr_shader_stage_frag : 0;
+    p_shader_program->shader_stages |= (comp_size > 0) ? tr_shader_stage_comp : 0;
 
-    tr_internal_vk_create_shader_program(p_renderer, vert_size, vert_code, vert_enpt, tesc_size, tesc_code, tesc_enpt, tese_size, tese_code, tese_enpt, geom_size, geom_code, geom_enpt, frag_size, frag_code, frag_enpt, p_shader_program);
+    tr_internal_vk_create_shader_program(p_renderer, vert_size, vert_code, vert_enpt, tesc_size, tesc_code, tesc_enpt, tese_size, tese_code, tese_enpt, geom_size, geom_code, geom_enpt, frag_size, frag_code, frag_enpt, comp_size, comp_code, comp_enpt, p_shader_program);
+
+    if ((vert_enpt != NULL) && (strlen(vert_enpt) > 0)) {
+      p_shader_program->vert_entry_point = (const char*)calloc(strlen(vert_enpt) + 1, sizeof(char));
+      assert(p_shader_program->vert_entry_point != NULL);
+      strncpy((char*)p_shader_program->vert_entry_point, vert_enpt, strlen(vert_enpt));
+    }
+
+    if ((tesc_enpt != NULL) && (strlen(tesc_enpt) > 0)) {
+      p_shader_program->tesc_entry_point = (const char*)calloc(strlen(tesc_enpt) + 1, sizeof(char));
+      assert(p_shader_program->tesc_entry_point != NULL);
+      strncpy((char*)p_shader_program->tesc_entry_point, tesc_enpt, strlen(tesc_enpt));
+    }
+
+    if ((tese_enpt != NULL) && (strlen(tese_enpt) > 0)) {
+      p_shader_program->tese_entry_point = (const char*)calloc(strlen(tese_enpt) + 1, sizeof(char));
+      assert(p_shader_program->tese_entry_point != NULL);
+      strncpy((char*)p_shader_program->tese_entry_point, tese_enpt, strlen(tese_enpt));
+    }
+
+    if ((geom_enpt != NULL) && (strlen(geom_enpt) > 0)) {
+      p_shader_program->geom_entry_point = (const char*)calloc(strlen(geom_enpt) + 1, sizeof(char));
+      assert(p_shader_program->geom_entry_point != NULL);
+      strncpy((char*)p_shader_program->geom_entry_point, geom_enpt, strlen(geom_enpt));
+    }
+
+    if ((frag_enpt != NULL) && (strlen(frag_enpt) > 0)) {
+      p_shader_program->frag_entry_point = (const char*)calloc(strlen(frag_enpt) + 1, sizeof(char));
+      assert(p_shader_program->frag_entry_point != NULL);
+      strncpy((char*)p_shader_program->frag_entry_point, frag_enpt, strlen(frag_enpt));
+    }
+
+    if ((comp_enpt != NULL) && (strlen(comp_enpt) > 0)) {
+      p_shader_program->comp_entry_point = (const char*)calloc(strlen(comp_enpt) + 1, sizeof(char));
+      assert(p_shader_program->comp_entry_point != NULL);
+      strncpy((char*)p_shader_program->comp_entry_point, comp_enpt, strlen(comp_enpt));
+    }
 
     *pp_shader_program = p_shader_program;
 }
 
 void tr_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const uint32_t* vert_code, const char* vert_enpt, uint32_t frag_size, const uint32_t* frag_code, const char* frag_enpt, tr_shader_program** pp_shader_program)
 {
-    tr_create_shader_program_n(p_renderer, vert_size, vert_code, vert_enpt, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, frag_size, frag_code, frag_enpt, pp_shader_program);
+    tr_create_shader_program_n(p_renderer, vert_size, vert_code, vert_enpt, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, frag_size, frag_code, frag_enpt, 0, NULL, NULL, pp_shader_program);
+}
+
+void tr_create_shader_program_compute(tr_renderer* p_renderer, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program** pp_shader_program)
+{
+    tr_create_shader_program_n(p_renderer, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, comp_size, comp_code, comp_enpt, pp_shader_program);
 }
 
 void tr_destroy_shader_program(tr_renderer* p_renderer, tr_shader_program* p_shader_program)
@@ -1557,6 +1747,24 @@ void tr_create_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_pro
     memcpy(&(p_pipeline->settings), p_pipeline_settings, sizeof(*p_pipeline_settings));
 
     tr_internal_vk_create_pipeline(p_renderer, p_shader_program, p_vertex_layout, p_descriptor_set, p_render_target, p_pipeline_settings, p_pipeline);
+    p_pipeline->type = tr_pipeline_type_graphics;
+
+    *pp_pipeline = p_pipeline;
+}
+
+tr_api_export void tr_create_compute_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, tr_descriptor_set* p_descriptor_set, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline** pp_pipeline)
+{
+    TINY_RENDERER_RENDERER_PTR_CHECK(p_renderer);
+    assert(NULL != p_shader_program);
+    assert(NULL != p_pipeline_settings);
+
+    tr_pipeline* p_pipeline = (tr_pipeline*)calloc(1, sizeof(*p_pipeline));
+    assert(NULL != p_pipeline);
+
+    memcpy(&(p_pipeline->settings), p_pipeline_settings, sizeof(*p_pipeline_settings));
+
+    tr_internal_vk_create_compute_pipeline(p_renderer, p_shader_program, p_descriptor_set, p_pipeline_settings, p_pipeline);
+    p_pipeline->type = tr_pipeline_type_compute;
 
     *pp_pipeline = p_pipeline;
 }
@@ -1644,7 +1852,7 @@ void tr_create_render_target(
     }
 
     // Create Vulkan specific objects for the render target
-    tr_internal_vk_create_render_target(p_renderer, p_render_target);
+    tr_internal_vk_create_render_target(p_renderer, false, p_render_target);
 
     *pp_render_target = p_render_target;
 }
@@ -1744,11 +1952,25 @@ void tr_cmd_set_scissor(tr_cmd* p_cmd, uint32_t x, uint32_t y, uint32_t width, u
     tr_internal_vk_cmd_set_scissor(p_cmd, x, y, width, height);
 }
 
+void tr_cmd_set_line_width(tr_cmd* p_cmd, float line_width)
+{
+    assert(NULL != p_cmd);
+
+    tr_internal_vk_cmd_set_line_width(p_cmd,  line_width);
+}
+
 void tr_cmd_clear_color_attachment(tr_cmd* p_cmd, uint32_t attachment_index, const tr_clear_value* clear_value)
 {
     assert(NULL != p_cmd);
 
     tr_cmd_internal_vk_cmd_clear_color_attachment(p_cmd, attachment_index, clear_value);
+}
+
+void tr_cmd_clear_depth_stencil_attachment(tr_cmd* p_cmd, const tr_clear_value* clear_value)
+{
+  assert(NULL != p_cmd);
+
+  tr_cmd_internal_vk_cmd_clear_depth_stencil_attachment(p_cmd, clear_value);
 }
 
 void tr_cmd_bind_pipeline(tr_cmd* p_cmd, tr_pipeline* p_pipeline)
@@ -1799,20 +2021,51 @@ void tr_cmd_draw_indexed(tr_cmd* p_cmd, uint32_t index_count, uint32_t first_ind
     tr_internal_vk_cmd_draw_indexed(p_cmd, index_count, first_index);
 }
 
+void tr_cmd_buffer_transition(tr_cmd* p_cmd, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage)
+{
+    assert(NULL != p_cmd);
+    assert(NULL != p_buffer);
+
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_buffer, old_usage, new_usage);
+}
+
 void tr_cmd_image_transition(tr_cmd* p_cmd, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage)
 {
     assert(NULL != p_cmd);
     assert(NULL != p_texture);
+
+    // Vulkan doesn't have an VkImageLayout corresponding to tr_texture_usage_storage, so
+    // just ignore transitions into or out of tr_texture_usage_storage.
+    if ((old_usage == tr_texture_usage_storage_image) || (new_usage == tr_texture_usage_storage_image)) {
+      return;
+    }
 
     tr_internal_vk_cmd_image_transition(p_cmd, p_texture, old_usage, new_usage);
 }
 
 void tr_cmd_render_target_transition(tr_cmd* p_cmd, tr_render_target* p_render_target, tr_texture_usage old_usage, tr_texture_usage new_usage)
 {
-    assert(NULL != p_cmd);
-    assert(NULL != p_render_target);
+    // Vulkan render passes take care of transitions, so just ignore this for now...
+}
 
-    tr_internal_vk_cmd_render_target_transition(p_cmd, p_render_target, old_usage, new_usage);
+void tr_cmd_depth_stencil_transition(tr_cmd* p_cmd, tr_render_target* p_render_target, tr_texture_usage old_usage, tr_texture_usage new_usage)
+{
+  // Vulkan render passes take care of transitions, so just ignore this for now...
+}
+
+void tr_cmd_dispatch(tr_cmd* p_cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z)
+{
+    assert(NULL != p_cmd);
+    tr_internal_vk_cmd_dispatch(p_cmd, group_count_x, group_count_y, group_count_z);
+}
+
+void tr_cmd_copy_buffer_to_texture2d(tr_cmd* p_cmd, uint32_t width, uint32_t height, uint32_t row_pitch, uint64_t buffer_offset, uint32_t mip_level, tr_buffer* p_buffer, tr_texture* p_texture)
+{
+    assert(p_cmd != NULL);
+    assert(p_buffer != NULL);
+    assert(p_texture != NULL);
+
+    tr_internal_vk_cmd_copy_buffer_to_texture2d(p_cmd, width, height, row_pitch, buffer_offset, mip_level, p_buffer, p_texture);
 }
 
 void tr_acquire_next_image(tr_renderer* p_renderer, tr_semaphore* p_signal_semaphore, tr_fence* p_fence)
@@ -1933,6 +2186,15 @@ uint32_t tr_vertex_layout_stride(const tr_vertex_layout* p_vertex_layout)
 // -------------------------------------------------------------------------------------------------
 // Utility functions
 // -------------------------------------------------------------------------------------------------
+
+// This function always returns zero for Vulkan for now because
+// of how the counter are configured.
+uint64_t tr_util_calc_storage_counter_offset(uint64_t buffer_size)
+{
+    uint64_t result = 0;
+    return result;
+}
+
 uint32_t tr_util_calc_mip_levels(uint32_t width, uint32_t height)
 {
     if (width == 0 || height == 0)
@@ -2141,6 +2403,28 @@ uint32_t tr_util_format_channel_count(tr_format format)
     return result;
 }
 
+void tr_util_transition_buffer(tr_queue* p_queue, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage)
+{
+    assert(NULL != p_queue);
+    assert(NULL != p_buffer);
+
+    tr_cmd_pool* p_cmd_pool = NULL;
+    tr_create_cmd_pool(p_queue->renderer, p_queue, true, &p_cmd_pool);
+
+    tr_cmd* p_cmd = NULL;
+    tr_create_cmd(p_cmd_pool, false, &p_cmd);
+    
+    tr_begin_cmd(p_cmd);
+    tr_cmd_buffer_transition(p_cmd, p_buffer, old_usage, new_usage);
+    tr_end_cmd(p_cmd);
+
+    tr_queue_submit(p_queue, 1, &p_cmd, 0, NULL, 0, NULL);
+    tr_queue_wait_idle(p_queue);
+
+    tr_destroy_cmd(p_cmd_pool, p_cmd);
+    tr_destroy_cmd_pool(p_queue->renderer, p_cmd_pool);
+}
+
 void tr_util_transition_image(tr_queue* p_queue, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage)
 {
     assert(NULL != p_queue);
@@ -2195,6 +2479,114 @@ bool tr_image_resize_uint8_t(
     return true;
 }
 
+void tr_util_set_storage_buffer_count(tr_queue* p_queue, uint64_t count_offset, uint32_t count, tr_buffer* p_counter_buffer)
+{
+    assert(NULL != p_queue);
+    assert(NULL != p_counter_buffer);
+    assert(NULL != p_counter_buffer->vk_buffer);
+
+    tr_buffer* buffer = NULL;
+    tr_create_buffer(p_counter_buffer->renderer, tr_buffer_usage_transfer_src, p_counter_buffer->size, true, &buffer);
+    uint32_t* mapped_ptr = (uint32_t*)buffer->cpu_mapped_address;
+    *(mapped_ptr) = count;
+    
+    tr_cmd_pool* p_cmd_pool = NULL;
+    tr_create_cmd_pool(p_queue->renderer, p_queue, true, &p_cmd_pool);
+
+    tr_cmd* p_cmd = NULL;
+    tr_create_cmd(p_cmd_pool, false, &p_cmd);
+
+    tr_begin_cmd(p_cmd);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_counter_buffer, tr_buffer_usage_storage_uav, tr_buffer_usage_transfer_dst);
+    TINY_RENDERER_DECLARE_ZERO(VkBufferCopy, region);
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size      = (VkDeviceSize)4;
+    vkCmdCopyBuffer(p_cmd->vk_cmd_buf, buffer->vk_buffer, p_counter_buffer->vk_buffer, 1, &region);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_counter_buffer, tr_buffer_usage_transfer_dst, tr_buffer_usage_storage_uav);
+    tr_end_cmd(p_cmd);
+
+    tr_queue_submit(p_queue, 1, &p_cmd, 0, NULL, 0, NULL);
+    tr_queue_wait_idle(p_queue);
+
+    tr_destroy_cmd(p_cmd_pool, p_cmd);
+    tr_destroy_cmd_pool(p_queue->renderer, p_cmd_pool);
+
+    tr_destroy_buffer(p_counter_buffer->renderer, buffer);
+}
+
+void tr_util_clear_buffer(tr_queue* p_queue, tr_buffer* p_buffer)
+{
+    assert(NULL != p_queue);
+    assert(NULL != p_buffer);
+    assert(NULL != p_buffer->vk_buffer);
+
+    tr_buffer* buffer = NULL;
+    tr_create_buffer(p_buffer->renderer, tr_buffer_usage_transfer_src, p_buffer->size, true, &buffer);
+    memset(buffer->cpu_mapped_address, 0, buffer->size);
+    
+    tr_cmd_pool* p_cmd_pool = NULL;
+    tr_create_cmd_pool(p_queue->renderer, p_queue, true, &p_cmd_pool);
+
+    tr_cmd* p_cmd = NULL;
+    tr_create_cmd(p_cmd_pool, false, &p_cmd);
+
+    tr_begin_cmd(p_cmd);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_buffer, p_buffer->usage, tr_buffer_usage_transfer_dst);
+    TINY_RENDERER_DECLARE_ZERO(VkBufferCopy, region);
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size      = (VkDeviceSize)p_buffer->size;
+    vkCmdCopyBuffer(p_cmd->vk_cmd_buf, buffer->vk_buffer, p_buffer->vk_buffer, 1, &region);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_buffer, tr_buffer_usage_transfer_dst, p_buffer->usage);
+    tr_end_cmd(p_cmd);
+
+    tr_queue_submit(p_queue, 1, &p_cmd, 0, NULL, 0, NULL);
+    tr_queue_wait_idle(p_queue);
+
+    tr_destroy_cmd(p_cmd_pool, p_cmd);
+    tr_destroy_cmd_pool(p_queue->renderer, p_cmd_pool);
+
+    tr_destroy_buffer(p_buffer->renderer, buffer);
+}
+
+void tr_util_update_buffer(tr_queue* p_queue, uint64_t size, const void* p_src_data, tr_buffer* p_buffer)
+{
+    assert(NULL != p_queue);
+    assert(NULL != p_src_data);
+    assert(NULL != p_buffer);
+    assert(NULL != p_buffer->vk_buffer);
+    assert(p_buffer->size >= size);
+
+    tr_buffer* buffer = NULL;
+    tr_create_buffer(p_buffer->renderer, tr_buffer_usage_transfer_src, size, true, &buffer);
+    memcpy(buffer->cpu_mapped_address, p_src_data, size);
+    
+    tr_cmd_pool* p_cmd_pool = NULL;
+    tr_create_cmd_pool(p_queue->renderer, p_queue, true, &p_cmd_pool);
+
+    tr_cmd* p_cmd = NULL;
+    tr_create_cmd(p_cmd_pool, false, &p_cmd);
+
+    tr_begin_cmd(p_cmd);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_buffer, p_buffer->usage, tr_buffer_usage_transfer_dst);
+    TINY_RENDERER_DECLARE_ZERO(VkBufferCopy, region);
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size      = (VkDeviceSize)size;
+    vkCmdCopyBuffer(p_cmd->vk_cmd_buf, buffer->vk_buffer, p_buffer->vk_buffer, 1, &region);
+    tr_internal_vk_cmd_buffer_transition(p_cmd, p_buffer, tr_buffer_usage_transfer_dst, p_buffer->usage);
+    tr_end_cmd(p_cmd);
+
+    tr_queue_submit(p_queue, 1, &p_cmd, 0, NULL, 0, NULL);
+    tr_queue_wait_idle(p_queue);
+
+    tr_destroy_cmd(p_cmd_pool, p_cmd);
+    tr_destroy_cmd_pool(p_queue->renderer, p_cmd_pool);
+
+    tr_destroy_buffer(p_buffer->renderer, buffer);
+}
+
 void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_t src_height, uint32_t src_row_stride, const uint8_t* p_src_data, uint32_t src_channel_count, tr_texture* p_texture, tr_image_resize_uint8_fn resize_fn, void* p_user_data)
 {
     assert(NULL != p_queue);
@@ -2206,7 +2598,7 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
 
     uint8_t* p_expanded_src_data = NULL;
     const uint32_t dst_channel_count = tr_util_format_channel_count(p_texture->format);
-    assert(src_channel_count < dst_channel_count);
+    assert(src_channel_count <= dst_channel_count);
 
     if (src_channel_count < dst_channel_count) {
         uint32_t expanded_row_stride = src_width * dst_channel_count;
@@ -2246,17 +2638,30 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
     // Create temporary buffer big enough to fit all mip levels
     tr_buffer* buffer = NULL;
     tr_create_buffer(p_texture->renderer, tr_buffer_usage_transfer_src, mem_reqs.size, true, &buffer);
-    // Get resource layout for all mip levels
-    VkSubresourceLayout* subres_layouts = (VkSubresourceLayout*)calloc(p_texture->mip_levels, sizeof(*subres_layouts));
-    assert(NULL != subres_layouts);
-    VkImageAspectFlags aspect_mask = tr_util_vk_determine_aspect_mask(tr_util_to_vk_format(p_texture->format));
-    for (uint32_t i = 0; i < p_texture->mip_levels; ++i) {
-        TINY_RENDERER_DECLARE_ZERO(VkImageSubresource, img_sub_res);
-        img_sub_res.aspectMask = aspect_mask;
-        img_sub_res.mipLevel   = i;
-        img_sub_res.arrayLayer = 0;
-        vkGetImageSubresourceLayout(p_texture->renderer->vk_device, p_texture->vk_image, &img_sub_res, &(subres_layouts[i]));
-    }    
+    //
+    // If you're coming from D3D12, you might want to do something like:
+    //
+    //   // Get resource layout for all mip levels
+    //   VkSubresourceLayout* subres_layouts = (VkSubresourceLayout*)calloc(p_texture->mip_levels, sizeof(*subres_layouts));
+    //   assert(NULL != subres_layouts);
+    //   VkImageAspectFlags aspect_mask = tr_util_vk_determine_aspect_mask(tr_util_to_vk_format(p_texture->format));
+    //   for (uint32_t i = 0; i < p_texture->mip_levels; ++i) {
+    //       TINY_RENDERER_DECLARE_ZERO(VkImageSubresource, img_sub_res);
+    //       img_sub_res.aspectMask = aspect_mask;
+    //       img_sub_res.mipLevel   = i;
+    //       img_sub_res.arrayLayer = 0;
+    //       vkGetImageSubresourceLayout(p_texture->renderer->vk_device, p_texture->vk_image, &img_sub_res, &(subres_layouts[i]));
+    //   } 
+    //
+    // ...unfortunately, in Vulkan this approach may be slightly 
+    // problematic, because you can only call vkGetImageSubresourceLayout on
+    // an image that was created with VK_IMAGE_TILING_LINEAR. The validation
+    // layers will issue an error if vkGetImageSubresourceLayout get called
+    // on an image created with VK_IMAGE_TILING_OPTIMAL. For now, since the
+    // total size of the memory is correct, we'll just calculate the row pitch
+    // and offset for each mip level manually.
+    // 
+    
     // Use default simple resize if a resize function was not supplied
     if (NULL == resize_fn) {
         resize_fn = &tr_image_resize_uint8_t;
@@ -2264,16 +2669,20 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
     // Resize image into appropriate mip level
     uint32_t dst_width = p_texture->width;
     uint32_t dst_height = p_texture->height;
+    VkDeviceSize buffer_offset = 0;
     for (uint32_t mip_level = 0; mip_level < p_texture->mip_levels; ++mip_level) {
-        VkSubresourceLayout* subres_layout = &subres_layouts[mip_level];
-        uint32_t dst_row_stride = subres_layout->rowPitch;
-        uint8_t* p_dst_data = (uint8_t*)buffer->cpu_mapped_address + subres_layout->offset;
+        uint32_t dst_row_stride = src_row_stride >> mip_level;
+        uint8_t* p_dst_data = (uint8_t*)buffer->cpu_mapped_address + buffer_offset;
         resize_fn(src_width, src_height, src_row_stride, p_src_data, dst_width, dst_height, dst_row_stride, p_dst_data, dst_channel_count, p_user_data);
+        buffer_offset += dst_row_stride * dst_height;
         dst_width >>= 1;
         dst_height >>= 1;
     }
 
     // Copy buffer to texture
+    buffer_offset = 0;
+    VkFormat format = tr_util_to_vk_format(p_texture->format);
+    VkImageAspectFlags aspect_mask = tr_util_vk_determine_aspect_mask(format);
     {
         const uint32_t region_count = p_texture->mip_levels;
         VkBufferImageCopy* regions = (VkBufferImageCopy*)calloc(region_count, sizeof(*regions));
@@ -2282,7 +2691,7 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
         dst_width = p_texture->width;
         dst_height = p_texture->height;
         for (uint32_t mip_level = 0; mip_level < p_texture->mip_levels; ++mip_level) {
-            regions[mip_level].bufferOffset                    = subres_layouts[mip_level].offset;
+            regions[mip_level].bufferOffset                    = buffer_offset;
             regions[mip_level].bufferRowLength                 = dst_width;
             regions[mip_level].bufferImageHeight               = dst_height;
             regions[mip_level].imageSubresource.aspectMask     = aspect_mask;
@@ -2295,6 +2704,7 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
             regions[mip_level].imageExtent.width               = dst_width;
             regions[mip_level].imageExtent.height              = dst_height;
             regions[mip_level].imageExtent.depth               = 1;
+            buffer_offset += (src_row_stride >> mip_level) * dst_height;
             dst_width >>= 1;
             dst_height >>= 1;
         }
@@ -2321,10 +2731,11 @@ void tr_util_update_texture_uint8(tr_queue* p_queue, uint32_t src_width, uint32_
         tr_destroy_cmd(p_cmd_pool, p_cmd);
         tr_destroy_cmd_pool(p_queue->renderer, p_cmd_pool);
 
+        tr_destroy_buffer(p_texture->renderer, buffer);
+
         TINY_RENDERER_SAFE_FREE(regions);
     }
 
-    TINY_RENDERER_SAFE_FREE(subres_layouts);
     TINY_RENDERER_SAFE_FREE(p_expanded_src_data);
 }
 
@@ -2351,24 +2762,6 @@ VkSampleCountFlagBits tr_util_to_vk_sample_count(tr_sample_count sample_count)
 VkBufferUsageFlags tr_util_to_vk_buffer_usage(tr_buffer_usage usage)
 {
     VkBufferUsageFlags result = 0;
-    if (tr_buffer_usage_transfer_src == (usage & tr_buffer_usage_transfer_src)) {
-        result |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    }
-    if (tr_buffer_usage_transfer_dst == (usage & tr_buffer_usage_transfer_dst)) {
-        result |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    }
-    if (tr_buffer_usage_uniform_texel == (usage & tr_buffer_usage_uniform_texel)) {
-        result |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
-    }
-    if (tr_buffer_usage_storage_texel == (usage & tr_buffer_usage_storage_texel)) {
-        result |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
-    }
-    if (tr_buffer_usage_uniform == (usage & tr_buffer_usage_uniform)) {
-        result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    }
-    if (tr_buffer_usage_storage == (usage & tr_buffer_usage_storage)) {
-        result |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    }
     if (tr_buffer_usage_index == (usage & tr_buffer_usage_index)) {
         result |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     }
@@ -2378,10 +2771,31 @@ VkBufferUsageFlags tr_util_to_vk_buffer_usage(tr_buffer_usage usage)
     if (tr_buffer_usage_indirect == (usage & tr_buffer_usage_indirect)) {
         result |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     }
+    if (tr_buffer_usage_transfer_src == (usage & tr_buffer_usage_transfer_src)) {
+        result |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (tr_buffer_usage_transfer_dst == (usage & tr_buffer_usage_transfer_dst)) {
+        result |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    }
+    if (tr_buffer_usage_uniform_cbv == (usage & tr_buffer_usage_uniform_cbv)) {
+        result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    }
+    if (tr_buffer_usage_storage_srv == (usage & tr_buffer_usage_storage_srv)) {
+        result |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (tr_buffer_usage_storage_uav == (usage & tr_buffer_usage_storage_uav)) {
+        result |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (tr_buffer_usage_uniform_texel_srv == (usage & tr_buffer_usage_uniform_texel_srv)) {
+        result |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+    }
+    if (tr_buffer_usage_storage_texel_uav == (usage & tr_buffer_usage_storage_texel_uav)) {
+        result |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+    }
     return result;
 }
 
-VkImageUsageFlags tr_util_to_vk_image_usage(tr_texture_usage usage)
+VkImageUsageFlags tr_util_to_vk_image_usage(tr_texture_usage_flags usage)
 {
     VkImageUsageFlags result = 0;
     if (tr_texture_usage_transfer_src == (usage & tr_texture_usage_transfer_src)) {
@@ -2393,7 +2807,7 @@ VkImageUsageFlags tr_util_to_vk_image_usage(tr_texture_usage usage)
     if (tr_texture_usage_sampled_image == (usage & tr_texture_usage_sampled_image)) {
         result |= VK_IMAGE_USAGE_SAMPLED_BIT;
     }
-    if (tr_texture_usage_storage == (usage & tr_texture_usage_storage)) {
+    if (tr_texture_usage_storage_image == (usage & tr_texture_usage_storage_image)) {
         result |= VK_IMAGE_USAGE_STORAGE_BIT;
     }
     if (tr_texture_usage_color_attachment == (usage & tr_texture_usage_color_attachment)) {
@@ -2401,6 +2815,12 @@ VkImageUsageFlags tr_util_to_vk_image_usage(tr_texture_usage usage)
     }
     if (tr_texture_usage_depth_stencil_attachment == (usage & tr_texture_usage_depth_stencil_attachment)) {
         result |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    }
+    if (tr_texture_usage_resolve_src == (usage & tr_texture_usage_resolve_src)) {
+        result |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if (tr_texture_usage_resolve_dst == (usage & tr_texture_usage_resolve_dst)) {
+        result |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
     return result;
 }
@@ -2413,9 +2833,11 @@ VkImageLayout tr_util_to_vk_image_layout(tr_texture_usage usage)
         case tr_texture_usage_transfer_src             : result = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; break;
         case tr_texture_usage_transfer_dst             : result = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; break;
         case tr_texture_usage_sampled_image            : result = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; break;
-        case tr_texture_usage_storage                  : result = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; break;
+        case tr_texture_usage_storage_image            : result = VK_IMAGE_LAYOUT_GENERAL; break;
         case tr_texture_usage_color_attachment         : result = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; break;
         case tr_texture_usage_depth_stencil_attachment : result = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; break;
+        case tr_texture_usage_resolve_src              : result = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; break;
+        case tr_texture_usage_resolve_dst              : result = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; break;
         case tr_texture_usage_present                  : result = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; break;
     }
     return result;
@@ -2573,31 +2995,34 @@ void tr_internal_vk_create_instance(const char* app_name, tr_renderer* p_rendere
     {
         // Extensions
         uint32_t extension_count = 0;
-        const char** extensions = (const char**)calloc(tr_max_instance_extensions, sizeof(*extensions));
-        // Add VK_EXT_debug_report if layers are present
-        if (((p_renderer->settings.instance_layers.count > 0) || (p_renderer->settings.device_layers.count > 0)) && (extension_count < tr_max_instance_extensions)) {
-            ++extension_count;
-            uint32_t n = extension_count - 1;
-            extensions[n] = (const char*)calloc(1, strlen(VK_EXT_DEBUG_REPORT_EXTENSION_NAME) + 1);
-            memcpy((void*)extensions[n], VK_EXT_DEBUG_REPORT_EXTENSION_NAME, strlen(VK_EXT_DEBUG_REPORT_EXTENSION_NAME) + 1);
+        const char* extensions[tr_max_instance_extensions] = { 0 };
+        // Copy extensions if they're present
+        if (p_renderer->settings.device_extensions.count > 0) {
+          for (; extension_count < p_renderer->settings.instance_extensions.count; ++extension_count) {
+            extensions[extension_count] = p_renderer->settings.instance_extensions.names[extension_count];
+          }
         }
-        // Add VK_KHR_surface extension
-        if (extension_count < tr_max_instance_extensions) {
-            ++extension_count;
-            uint32_t n = extension_count - 1;
-            extensions[n] = (const char*)calloc(1, strlen(VK_KHR_SURFACE_EXTENSION_NAME) + 1);
-            memcpy((void*)extensions[n], VK_KHR_SURFACE_EXTENSION_NAME, strlen(VK_KHR_SURFACE_EXTENSION_NAME) + 1);
-        }
-#if defined(TINY_RENDERER_MSW)
-        // Add VK_KHR_win32_surface extension
-        if (extension_count < tr_max_instance_extensions) {
-            ++extension_count;
-            uint32_t n = extension_count - 1;
-            extensions[n] = (const char*)calloc(1, strlen(VK_KHR_WIN32_SURFACE_EXTENSION_NAME) + 1);
-            memcpy((void*)extensions[n], VK_KHR_WIN32_SURFACE_EXTENSION_NAME, strlen(VK_KHR_WIN32_SURFACE_EXTENSION_NAME) + 1);
-        }
+        else {
+          // Use default extensions
+          extensions[extension_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+#if defined(TINY_RENDERER_LINUX)
+          extensions[extension_count++] = VK_KHR_XCB_SURFACE_EXTENSION_NAME;
+#elif defined(TINY_RENDERER_MSW)
+          extensions[extension_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
 #endif
-        // Add more extensions here
+        }
+
+        for (uint32_t i = 0; i < p_renderer->settings.instance_layers.count; ++i) {
+          if (extension_count >= tr_max_instance_extensions) {
+            break;
+          }
+
+          int cmp = strcmp(p_renderer->settings.instance_layers.names[i], "VK_LAYER_LUNARG_standard_validation");
+          if (cmp == 0) {
+            extensions[extension_count++] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
+          }
+        }
+
         TINY_RENDERER_DECLARE_ZERO(VkInstanceCreateInfo, create_info);
         create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.pNext                   = NULL;
@@ -2609,12 +3034,6 @@ void tr_internal_vk_create_instance(const char* app_name, tr_renderer* p_rendere
         create_info.ppEnabledExtensionNames = extensions;
         VkResult vk_res = vkCreateInstance(&create_info, NULL, &(p_renderer->vk_instance));
         assert(VK_SUCCESS == vk_res);
-
-        // Free extension names
-        for (uint32_t i = 0; i < extension_count; ++i) {
-            TINY_RENDERER_SAFE_FREE(extensions[i]);
-        }
-        TINY_RENDERER_SAFE_FREE(extensions);
     }
 
     // Debug
@@ -2649,7 +3068,16 @@ void tr_internal_vk_create_surface(tr_renderer* p_renderer)
 {
     assert(VK_NULL_HANDLE != p_renderer->vk_instance);
 
-#if defined(TINY_RENDERER_MSW)
+#if defined(TINY_RENDERER_LINUX)
+    TINY_RENDERER_DECLARE_ZERO(VkXcbSurfaceCreateInfoKHR, create_info);
+    create_info.sType      = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+    create_info.pNext      = NULL;
+    create_info.flags      = 0;
+    create_info.connection = p_renderer->settings.handle.connection;
+    create_info.window     = p_renderer->settings.handle.window;
+    VkResult vk_res = vkCreateXcbSurfaceKHR(p_renderer->vk_instance, &create_info, NULL, &(p_renderer->vk_surface));
+    assert(VK_SUCCESS == vk_res);
+#elif defined(TINY_RENDERER_MSW)
     TINY_RENDERER_DECLARE_ZERO(VkWin32SurfaceCreateInfoKHR, create_info);
     create_info.sType     = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
     create_info.pNext     = NULL;
@@ -2707,13 +3135,7 @@ void tr_internal_vk_create_device(tr_renderer* p_renderer)
     assert(VK_NULL_HANDLE != p_renderer->vk_active_gpu);
 
     uint32_t count = 0;
-    VkLayerProperties layers[100];
     VkExtensionProperties exts[100];
-    vkEnumerateDeviceLayerProperties(p_renderer->vk_active_gpu, &count, NULL);
-    vkEnumerateDeviceLayerProperties(p_renderer->vk_active_gpu, &count, layers);
-    for (uint32_t i =0; i < count; ++i) {
-        tr_internal_log(tr_log_type_info, layers[i].layerName, "vkdevice-layer");
-    }
     vkEnumerateDeviceExtensionProperties(p_renderer->vk_active_gpu, NULL, &count, NULL);
     vkEnumerateDeviceExtensionProperties(p_renderer->vk_active_gpu, NULL, &count, exts);
     for (uint32_t i =0; i < count; ++i) {
@@ -2745,16 +3167,25 @@ void tr_internal_vk_create_device(tr_renderer* p_renderer)
         queue_create_infos[1].pQueuePriorities = queue_priorites;
     }
 
+    // Device extensions
     uint32_t extension_count = 0;
-    char** extensions = (char**)calloc(tr_max_instance_extensions, sizeof(*extensions));
-    // Add VK_KHR_surface extension
-    if (extension_count < tr_max_instance_extensions) {
-        ++extension_count;
-        uint32_t n = extension_count - 1;
-        extensions[n] = (char*)calloc(1, strlen(VK_KHR_SWAPCHAIN_EXTENSION_NAME) + 1);
-        memcpy(extensions[n], VK_KHR_SWAPCHAIN_EXTENSION_NAME, strlen(VK_KHR_SWAPCHAIN_EXTENSION_NAME) + 1);
+    const char* extensions[tr_max_instance_extensions] = { 0 };
+    // Copy extensions if they're present
+    if (p_renderer->settings.device_extensions.count > 0) {
+      for (; extension_count < p_renderer->settings.device_extensions.count; ++extension_count) {
+        extensions[extension_count] = p_renderer->settings.device_extensions.names[extension_count];
+      }
     }
-    // Add more extensions here
+    else {
+      // Use default extensions
+      extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+      extensions[extension_count++] = VK_KHR_MAINTENANCE1_EXTENSION_NAME;
+    }
+
+    VkPhysicalDeviceFeatures gpu_features = { 0 };
+    vkGetPhysicalDeviceFeatures(p_renderer->vk_active_gpu, &gpu_features);
+    gpu_features.multiViewport  = VK_FALSE;
+    gpu_features.geometryShader = VK_TRUE;
         
     TINY_RENDERER_DECLARE_ZERO(VkDeviceCreateInfo, create_info);
     create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2762,19 +3193,13 @@ void tr_internal_vk_create_device(tr_renderer* p_renderer)
     create_info.flags                   = 0;
     create_info.queueCreateInfoCount    = queue_create_infos_count;
     create_info.pQueueCreateInfos       = queue_create_infos;
-    create_info.enabledLayerCount       = p_renderer->settings.device_layers.count;
-    create_info.ppEnabledLayerNames     = p_renderer->settings.device_layers.names;
+    create_info.enabledLayerCount       = 0;
+    create_info.ppEnabledLayerNames     = NULL;
     create_info.enabledExtensionCount   = extension_count;
     create_info.ppEnabledExtensionNames = extensions;
-    create_info.pEnabledFeatures        = NULL;
+    create_info.pEnabledFeatures        = &gpu_features;
     vk_res = vkCreateDevice(p_renderer->vk_active_gpu, &create_info, NULL, &(p_renderer->vk_device));
     assert(VK_SUCCESS == vk_res);
-
-    // Free extensions names
-    for (uint32_t i = 0; i < extension_count; ++i) {
-        free(extensions[i]);
-    }
-    free(extensions);
 
     vkGetDeviceQueue(p_renderer->vk_device, p_renderer->graphics_queue->vk_queue_family_index, 0, &(p_renderer->graphics_queue->vk_queue));
     assert(VK_NULL_HANDLE != p_renderer->graphics_queue->vk_queue);
@@ -2799,6 +3224,10 @@ void tr_internal_vk_create_swapchain(tr_renderer* p_renderer)
         TINY_RENDERER_DECLARE_ZERO(VkSurfaceCapabilitiesKHR, caps);
         VkResult vk_res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(p_renderer->vk_active_gpu, p_renderer->vk_surface, &caps);
         assert(VK_SUCCESS == vk_res);
+
+        if (p_renderer->settings.swapchain.image_count < caps.minImageCount) {
+          p_renderer->settings.swapchain.image_count = caps.minImageCount;
+        }
 
         if ((caps.maxImageCount > 0) && (p_renderer->settings.swapchain.image_count > caps.maxImageCount)) {
             p_renderer->settings.swapchain.image_count = caps.maxImageCount;
@@ -2960,6 +3389,11 @@ void tr_internal_create_swapchain_renderpass(tr_renderer* p_renderer)
         if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
             render_target->depth_stencil_attachment = (tr_texture*)calloc(1, sizeof(*render_target->depth_stencil_attachment));
             assert(NULL != render_target->depth_stencil_attachment);
+
+            if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
+                render_target->depth_stencil_attachment_multisample = (tr_texture*)calloc(1, sizeof(*render_target->depth_stencil_attachment_multisample));
+                assert(NULL != render_target->depth_stencil_attachment_multisample);
+            }
         }
     }
 
@@ -2980,7 +3414,7 @@ void tr_internal_create_swapchain_renderpass(tr_renderer* p_renderer)
 
         if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
             render_target->color_attachments_multisample[0]->type          = tr_texture_type_2d;
-            render_target->color_attachments_multisample[0]->usage         = tr_texture_usage_color_attachment;
+            render_target->color_attachments_multisample[0]->usage         = (tr_texture_usage)(tr_texture_usage_color_attachment | tr_texture_usage_sampled_image);
             render_target->color_attachments_multisample[0]->width         = p_renderer->settings.width;
             render_target->color_attachments_multisample[0]->height        = p_renderer->settings.height;
             render_target->color_attachments_multisample[0]->depth         = 1;
@@ -2995,7 +3429,7 @@ void tr_internal_create_swapchain_renderpass(tr_renderer* p_renderer)
 
         if (tr_format_undefined != p_renderer->settings.swapchain.depth_stencil_format) {
             render_target->depth_stencil_attachment->type                = tr_texture_type_2d;
-            render_target->depth_stencil_attachment->usage               = tr_texture_usage_depth_stencil_attachment;
+            render_target->depth_stencil_attachment->usage               = (tr_texture_usage)(tr_texture_usage_depth_stencil_attachment | tr_texture_usage_sampled_image);
             render_target->depth_stencil_attachment->width               = p_renderer->settings.width;
             render_target->depth_stencil_attachment->height              = p_renderer->settings.height;
             render_target->depth_stencil_attachment->depth               = 1;
@@ -3003,7 +3437,20 @@ void tr_internal_create_swapchain_renderpass(tr_renderer* p_renderer)
             render_target->depth_stencil_attachment->mip_levels          = 1;
             render_target->depth_stencil_attachment->clear_value.depth   = p_renderer->settings.swapchain.depth_stencil_clear_value.depth;
             render_target->depth_stencil_attachment->clear_value.stencil = p_renderer->settings.swapchain.depth_stencil_clear_value.stencil;
-            render_target->depth_stencil_attachment->sample_count        = render_target->sample_count;
+            render_target->depth_stencil_attachment->sample_count        = tr_sample_count_1;
+            
+            if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
+              render_target->depth_stencil_attachment_multisample->type                = tr_texture_type_2d;
+              render_target->depth_stencil_attachment_multisample->usage               = (tr_texture_usage)(tr_texture_usage_depth_stencil_attachment | tr_texture_usage_sampled_image);
+              render_target->depth_stencil_attachment_multisample->width               = p_renderer->settings.width;
+              render_target->depth_stencil_attachment_multisample->height              = p_renderer->settings.height;
+              render_target->depth_stencil_attachment_multisample->depth               = 1;
+              render_target->depth_stencil_attachment_multisample->format              = p_renderer->settings.swapchain.depth_stencil_format;
+              render_target->depth_stencil_attachment_multisample->mip_levels          = 1;
+              render_target->depth_stencil_attachment_multisample->clear_value.depth   = p_renderer->settings.swapchain.depth_stencil_clear_value.depth;
+              render_target->depth_stencil_attachment_multisample->clear_value.stencil = p_renderer->settings.swapchain.depth_stencil_clear_value.stencil;
+              render_target->depth_stencil_attachment_multisample->sample_count        = render_target->sample_count;            
+            }
         }
     }
 }
@@ -3036,13 +3483,17 @@ void tr_internal_vk_create_swapchain_renderpass(tr_renderer* p_renderer)
 
         if (NULL != render_target->depth_stencil_attachment) {
             tr_internal_vk_create_texture(p_renderer, render_target->depth_stencil_attachment);
+            
+            if (p_renderer->settings.swapchain.sample_count > tr_sample_count_1) {
+                tr_internal_vk_create_texture(p_renderer, render_target->depth_stencil_attachment_multisample);
+            }
         }
     }
 
     // Initialize Vulkan render target objects
     for (uint32_t i = 0; i < p_renderer->settings.swapchain.image_count; ++i) {
         tr_render_target* render_target = p_renderer->swapchain_render_targets[i];
-        tr_internal_vk_create_render_target(p_renderer, render_target);
+        tr_internal_vk_create_render_target(p_renderer, true, render_target);
     }
 
     TINY_RENDERER_SAFE_FREE(swapchain_images);
@@ -3151,9 +3602,14 @@ void tr_internal_vk_create_descriptor_set(tr_renderer* p_renderer, tr_descriptor
         VkDescriptorSetLayoutBinding* binding = &(bindings[i]);
         uint32_t type_index = UINT32_MAX;
         switch (descriptor->type) {
-            case tr_descriptor_type_sampler        : type_index = VK_DESCRIPTOR_TYPE_SAMPLER; break;
-            case tr_descriptor_type_texture        : type_index = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; break;
-            case tr_descriptor_type_uniform_buffer : type_index = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; break;
+            case tr_descriptor_type_sampler                  : type_index = VK_DESCRIPTOR_TYPE_SAMPLER; break;
+            case tr_descriptor_type_uniform_buffer_cbv       : type_index = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; break;
+            case tr_descriptor_type_storage_buffer_srv       : type_index = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; break;
+            case tr_descriptor_type_storage_buffer_uav       : type_index = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; break;
+            case tr_descriptor_type_uniform_texel_buffer_srv : type_index = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER; break;
+            case tr_descriptor_type_storage_texel_buffer_uav : type_index = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER; break;
+            case tr_descriptor_type_texture_srv              : type_index = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; break;
+            case tr_descriptor_type_texture_uav              : type_index = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; break;
         }
         if (UINT32_MAX != type_index) {
             binding->binding            = descriptor->binding;
@@ -3288,10 +3744,10 @@ void tr_internal_vk_create_buffer(tr_renderer* p_renderer, tr_buffer* p_buffer)
     assert(VK_NULL_HANDLE != p_renderer->vk_device);
 
     // Align the buffer size to multiples of the dynamic uniform buffer minimum size
-    if (p_buffer->usage & tr_buffer_usage_uniform) {
+    if (p_buffer->usage & tr_buffer_usage_uniform_cbv) {
         // Make minimum size 256 bytes to match D3D12
-        p_buffer->size = tr_round_up(tr_max(p_buffer->size, 256), 
-                                     p_renderer->vk_active_gpu_properties.limits.minUniformBufferOffsetAlignment);
+        p_buffer->size = tr_round_up(tr_max((uint32_t)p_buffer->size, 256), 
+                                     (uint32_t)(p_renderer->vk_active_gpu_properties.limits.minUniformBufferOffsetAlignment));
     }
 
     TINY_RENDERER_DECLARE_ZERO(VkBufferCreateInfo, create_info);
@@ -3303,6 +3759,10 @@ void tr_internal_vk_create_buffer(tr_renderer* p_renderer, tr_buffer* p_buffer)
     create_info.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
     create_info.queueFamilyIndexCount = 0;
     create_info.pQueueFamilyIndices   = NULL;
+
+    // Make it easy to copy to and from buffer
+    create_info.usage |= (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
     VkResult vk_res = vkCreateBuffer(p_renderer->vk_device, &create_info, NULL, &(p_buffer->vk_buffer));
     assert(VK_SUCCESS == vk_res);
 
@@ -3334,10 +3794,28 @@ void tr_internal_vk_create_buffer(tr_renderer* p_renderer, tr_buffer* p_buffer)
         assert(VK_SUCCESS == vk_res);
     }
 
-    if (p_buffer->usage & tr_buffer_usage_uniform) {
-        p_buffer->vk_buffer_view.buffer = p_buffer->vk_buffer;
-        p_buffer->vk_buffer_view.offset = 0;
-        p_buffer->vk_buffer_view.range  = VK_WHOLE_SIZE;
+    switch (p_buffer->usage) {
+        case tr_buffer_usage_uniform_texel_srv:
+        case tr_buffer_usage_storage_texel_uav: {
+            TINY_RENDERER_DECLARE_ZERO(VkBufferViewCreateInfo, buffer_view_create_info);
+            buffer_view_create_info.sType   = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+            buffer_view_create_info.pNext   = NULL;
+            buffer_view_create_info.flags   = 0;
+            buffer_view_create_info.buffer  = p_buffer->vk_buffer;
+            buffer_view_create_info.format  = tr_util_to_vk_format(p_buffer->format);
+            buffer_view_create_info.range   = VK_WHOLE_SIZE;
+            vk_res = vkCreateBufferView(p_renderer->vk_device, &buffer_view_create_info, NULL, &(p_buffer->vk_buffer_view));
+        }
+        break;
+
+        case tr_buffer_usage_uniform_cbv:
+        case tr_buffer_usage_storage_srv:
+        case tr_buffer_usage_storage_uav: {
+            p_buffer->vk_buffer_info.buffer = p_buffer->vk_buffer;
+            p_buffer->vk_buffer_info.offset = 0;
+            p_buffer->vk_buffer_info.range  = VK_WHOLE_SIZE;
+        }
+        break;
     }
 }
 
@@ -3475,7 +3953,8 @@ void tr_internal_vk_create_texture(tr_renderer* p_renderer, tr_texture* p_textur
     }
 
     p_texture->vk_texture_view.imageView = p_texture->vk_image_view;
-    p_texture->vk_texture_view.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    p_texture->vk_texture_view.imageLayout = (p_texture->usage & tr_texture_usage_storage_image) ? VK_IMAGE_LAYOUT_GENERAL
+                                                                                                 : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 void tr_internal_vk_destroy_texture(tr_renderer* p_renderer, tr_texture* p_texture)
@@ -3537,11 +4016,11 @@ void tr_internal_vk_destroy_sampler(tr_renderer* p_renderer, tr_sampler* p_sampl
     vkDestroySampler(p_renderer->vk_device, p_sampler->vk_sampler, NULL);
 }
 
-void tr_internal_vk_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, tr_shader_program* p_shader_program)
+void tr_internal_vk_create_shader_program(tr_renderer* p_renderer, uint32_t vert_size, const void* vert_code, const char* vert_enpt, uint32_t tesc_size, const void* tesc_code, const char* tesc_enpt, uint32_t tese_size, const void* tese_code, const char* tese_enpt, uint32_t geom_size, const void* geom_code, const char* geom_enpt, uint32_t frag_size, const void* frag_code, const char* frag_enpt, uint32_t comp_size, const void* comp_code, const char* comp_enpt, tr_shader_program* p_shader_program)
 {
     assert(VK_NULL_HANDLE != p_renderer->vk_device);
 
-    for (uint32_t i = 0; i < 5; ++i) {
+    for (uint32_t i = 0; i < tr_shader_stage_count; ++i) {
         tr_shader_stage stage_mask = (tr_shader_stage)(1 << i);
         if (stage_mask == (p_shader_program->shader_stages & stage_mask)) {
             TINY_RENDERER_DECLARE_ZERO(VkShaderModuleCreateInfo, create_info);
@@ -3577,6 +4056,12 @@ void tr_internal_vk_create_shader_program(tr_renderer* p_renderer, uint32_t vert
                     create_info.codeSize = frag_size;
                     create_info.pCode = (const uint32_t*)frag_code;
                     VkResult vk_res = vkCreateShaderModule(p_renderer->vk_device, &create_info, NULL, &(p_shader_program->vk_frag));
+                    assert(VK_SUCCESS == vk_res);
+                } break;
+                case tr_shader_stage_comp: {
+                    create_info.codeSize = comp_size;
+                    create_info.pCode = (const uint32_t*)comp_code;
+                    VkResult vk_res = vkCreateShaderModule(p_renderer->vk_device, &create_info, NULL, &(p_shader_program->vk_comp));
                     assert(VK_SUCCESS == vk_res);
                 } break;
             }
@@ -3639,26 +4124,30 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
                 stages[stage_count].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 stages[stage_count].pNext = NULL;
                 stages[stage_count].flags = 0;
-                stages[stage_count].pName = "main";
                 stages[stage_count].pSpecializationInfo = NULL;         
                 switch(stage_mask) {
                     case tr_shader_stage_vert: {
+                        stages[stage_count].pName  = p_shader_program->vert_entry_point;
                         stages[stage_count].stage  = VK_SHADER_STAGE_VERTEX_BIT; 
                         stages[stage_count].module = p_shader_program->vk_vert;
                     } break;
                     case tr_shader_stage_tesc: {
+                        stages[stage_count].pName  = p_shader_program->tesc_entry_point;
                         stages[stage_count].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT; 
                         stages[stage_count].module = p_shader_program->vk_tesc;
                     } break;
                     case tr_shader_stage_tese: {
+                        stages[stage_count].pName  = p_shader_program->tese_entry_point;
                         stages[stage_count].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
                         stages[stage_count].module = p_shader_program->vk_tese;
                     } break;
                     case tr_shader_stage_geom: {
+                        stages[stage_count].pName  = p_shader_program->geom_entry_point;
                         stages[stage_count].stage = VK_SHADER_STAGE_GEOMETRY_BIT; 
                         stages[stage_count].module = p_shader_program->vk_geom;
                     } break;
                     case tr_shader_stage_frag: {
+                        stages[stage_count].pName  = p_shader_program->frag_entry_point;
                         stages[stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT; 
                         stages[stage_count].module = p_shader_program->vk_frag;
                     } break;
@@ -3710,11 +4199,15 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
                                                 
         VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         switch(p_pipeline_settings->primitive_topo) {
-            case tr_primitive_topo_point_list : topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
-            case tr_primitive_topo_line_list  : topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
-            case tr_primitive_topo_line_strip : topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
-            case tr_primitive_topo_tri_strip  : topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
-            case tr_primitive_topo_tri_fan    : topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+            case tr_primitive_topo_point_list     : topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+            case tr_primitive_topo_line_list      : topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+            case tr_primitive_topo_line_strip     : topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+            case tr_primitive_topo_tri_strip      : topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+            case tr_primitive_topo_tri_fan        : topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN; break;
+            case tr_primitive_topo_1_point_patch  : topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST; break;
+            case tr_primitive_topo_2_point_patch  : topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST; break;
+            case tr_primitive_topo_3_point_patch  : topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST; break;
+            case tr_primitive_topo_4_point_patch  : topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST; break;
         }
         TINY_RENDERER_DECLARE_ZERO(VkPipelineInputAssemblyStateCreateInfo, ia);
         ia.sType                                    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -3723,19 +4216,31 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
         ia.topology                                 = topology;
         ia.primitiveRestartEnable                   = VK_FALSE;
 
+        // Validation is reporting an error for this. Disabling for now.
+        VkPipelineTessellationDomainOriginStateCreateInfoKHR domain_origin = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO_KHR };
+        switch (p_pipeline_settings->tessellation_domain_origin) {
+          case tr_tessellation_domain_origin_upper_left: domain_origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT_KHR; break;
+          case tr_tessellation_domain_origin_lower_left: domain_origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT_KHR; break;
+        }
         TINY_RENDERER_DECLARE_ZERO(VkPipelineTessellationStateCreateInfo, ts);
         ts.sType                                    = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-        ts.pNext                                    = NULL;
+        ts.pNext                                    = NULL; //&domain_origin;
         ts.flags                                    = 0;
         ts.patchControlPoints                       = 0;
+        switch (p_pipeline_settings->primitive_topo) {
+          case tr_primitive_topo_1_point_patch: ts.patchControlPoints = 1; break;
+          case tr_primitive_topo_2_point_patch: ts.patchControlPoints = 2; break;
+          case tr_primitive_topo_3_point_patch: ts.patchControlPoints = 3; break;
+          case tr_primitive_topo_4_point_patch: ts.patchControlPoints = 4; break;
+        }
 
         TINY_RENDERER_DECLARE_ZERO(VkPipelineViewportStateCreateInfo, vs);
         vs.sType                                    = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
         vs.pNext                                    = NULL;
         vs.flags                                    = 0;
-        vs.viewportCount                            = 0;
+        vs.viewportCount                            = 1;
         vs.pViewports                               = NULL;
-        vs.scissorCount                             = 0;
+        vs.scissorCount                             = 1;
         vs.pScissors                                = NULL;
 
         VkCullModeFlags cull_mode = VK_CULL_MODE_NONE;
@@ -3744,7 +4249,7 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
             case tr_cull_mode_front : cull_mode = VK_CULL_MODE_FRONT_BIT; break;
             case tr_cull_mode_both  : cull_mode = VK_CULL_MODE_FRONT_AND_BACK; break;
         }
-        VkFrontFace front_face = (tr_fornt_face_cw == p_pipeline_settings->front_face) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        VkFrontFace front_face = (tr_front_face_cw == p_pipeline_settings->front_face) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         TINY_RENDERER_DECLARE_ZERO(VkPipelineRasterizationStateCreateInfo, rs);
         rs.sType                                    = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rs.pNext                                    = NULL;
@@ -3775,9 +4280,9 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
         ds.sType                                    = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         ds.pNext                                    = NULL;
         ds.flags                                    = 0;
-        ds.depthTestEnable                          = p_pipeline_settings->depth_test ? VK_TRUE : VK_FALSE;
-        ds.depthWriteEnable                         = p_pipeline_settings->depth_write ? VK_TRUE : VK_FALSE;
-        ds.depthCompareOp                           = VK_COMPARE_OP_LESS_OR_EQUAL; // @TODO: Add more depth funcs
+        ds.depthTestEnable                          = p_pipeline_settings->depth ? VK_TRUE : VK_FALSE;
+        ds.depthWriteEnable                         = p_pipeline_settings->depth ? VK_TRUE : VK_FALSE;
+        ds.depthCompareOp                           = VK_COMPARE_OP_LESS;
         ds.depthBoundsTestEnable                    = VK_FALSE;
         ds.stencilTestEnable                        = VK_FALSE;
         ds.front.failOp                             = VK_STENCIL_OP_KEEP;
@@ -3859,7 +4364,49 @@ void tr_internal_vk_create_pipeline(tr_renderer* p_renderer, tr_shader_program* 
         VkResult vk_res = vkCreateGraphicsPipelines(p_renderer->vk_device, VK_NULL_HANDLE, 1, &create_info, NULL, &(p_pipeline->vk_pipeline));
         assert(VK_SUCCESS == vk_res);
     }
-    
+}
+
+void tr_internal_vk_create_compute_pipeline(tr_renderer* p_renderer, tr_shader_program* p_shader_program, tr_descriptor_set* p_descriptor_set, const tr_pipeline_settings* p_pipeline_settings, tr_pipeline* p_pipeline)
+{
+    assert(p_renderer->vk_device != VK_NULL_HANDLE);
+    assert(p_shader_program->vk_comp != VK_NULL_HANDLE);
+
+    // Pipeline layout
+    {
+        TINY_RENDERER_DECLARE_ZERO(VkPipelineLayoutCreateInfo, create_info);
+        create_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        create_info.pNext                  = NULL;
+        create_info.flags                  = 0;
+        create_info.setLayoutCount         = (NULL != p_descriptor_set) ? 1 : 0;
+        create_info.pSetLayouts            = (NULL != p_descriptor_set) ? &(p_descriptor_set->vk_descriptor_set_layout) : NULL;
+        create_info.pushConstantRangeCount = 0;
+        create_info.pPushConstantRanges    = NULL;
+        VkResult vk_res = vkCreatePipelineLayout(p_renderer->vk_device, &create_info, NULL, &(p_pipeline->vk_pipeline_layout));
+        assert(VK_SUCCESS == vk_res);
+    }
+
+    // Pipeline
+    {
+      TINY_RENDERER_DECLARE_ZERO(VkPipelineShaderStageCreateInfo , stage);
+      stage.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.pNext               = NULL;
+      stage.flags               = 0;
+      stage.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
+      stage.module              = p_shader_program->vk_comp;
+      stage.pName               = p_shader_program->comp_entry_point;
+      stage.pSpecializationInfo = NULL;  
+
+      TINY_RENDERER_DECLARE_ZERO(VkComputePipelineCreateInfo, create_info);
+      create_info.sType               = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+      create_info.pNext               = NULL;
+      create_info.flags               = 0;
+      create_info.stage               = stage;
+      create_info.layout              = p_pipeline->vk_pipeline_layout;
+      create_info.basePipelineHandle  = 0;
+      create_info.basePipelineIndex   = 0;
+      VkResult vk_res = vkCreateComputePipelines(p_renderer->vk_device, VK_NULL_HANDLE, 1, &create_info, NULL, &(p_pipeline->vk_pipeline));
+      assert(VK_SUCCESS == vk_res);
+    }
 }
 
 void tr_internal_vk_destroy_pipeline(tr_renderer* p_renderer, tr_pipeline* p_pipeline)
@@ -3872,7 +4419,7 @@ void tr_internal_vk_destroy_pipeline(tr_renderer* p_renderer, tr_pipeline* p_pip
     vkDestroyPipelineLayout(p_renderer->vk_device, p_pipeline->vk_pipeline_layout, NULL);
 }
 
-void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target* p_render_target)
+void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, bool is_swapchain, tr_render_target* p_render_target)
 {
     assert(VK_NULL_HANDLE != p_renderer->vk_device);
 
@@ -3881,18 +4428,21 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
 
     VkAttachmentDescription* attachments = NULL;
     VkAttachmentReference* color_attachment_refs = NULL;
-    VkAttachmentReference* resolve_attachment_refs = NULL;
     VkAttachmentReference* depth_stencil_attachment_ref = NULL;
+    // Resolve is for color attachments only, there's no mapping in 
+    // the subpass description for a depth stencil resolve.
+    VkAttachmentReference* resolve_attachment_refs = NULL;
 
     // Fill out attachment descriptions and references
     if (p_render_target->sample_count > tr_sample_count_1) {
-        attachments = (VkAttachmentDescription*)calloc((2 * color_attachment_count) + depth_stencil_attachment_count, sizeof(*attachments));
+        uint32_t attachment_description_count = (2 * color_attachment_count) + depth_stencil_attachment_count;
+        attachments = (VkAttachmentDescription*)calloc(attachment_description_count, sizeof(*attachments));
         assert(NULL != attachments);
 
         if (color_attachment_count > 0) {
             color_attachment_refs = (VkAttachmentReference*)calloc(color_attachment_count, sizeof(*color_attachment_refs));
             assert(NULL != color_attachment_refs);
-            
+
             resolve_attachment_refs = (VkAttachmentReference*)calloc(color_attachment_count, sizeof(*resolve_attachment_refs));
             assert(NULL != resolve_attachment_refs);
         }
@@ -3914,8 +4464,8 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
             attachments[ssidx].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[ssidx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachments[ssidx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[ssidx].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            attachments[ssidx].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments[ssidx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[ssidx].finalLayout    = is_swapchain ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
             attachments[msidx].flags          = 0;
             attachments[msidx].format         = tr_util_to_vk_format(p_render_target->color_format);
@@ -3924,19 +4474,21 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
             attachments[msidx].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[msidx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachments[msidx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[msidx].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments[msidx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
             attachments[msidx].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
             // references
             color_attachment_refs[i].attachment   = msidx;
-            color_attachment_refs[i].layout       = attachments[msidx].initialLayout;
+            color_attachment_refs[i].layout       = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             resolve_attachment_refs[i].attachment = ssidx;
-            resolve_attachment_refs[i].layout     = attachments[ssidx].initialLayout;
+            resolve_attachment_refs[i].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
 
         // Depth stencil
         if (depth_stencil_attachment_count > 0) {
             uint32_t idx = (2 * color_attachment_count);
+
+            /// Descriptions
             attachments[idx].flags          = 0;
             attachments[idx].format         = tr_util_to_vk_format(p_render_target->depth_stencil_format);
             attachments[idx].samples        = tr_util_to_vk_sample_count(p_render_target->sample_count);
@@ -3944,14 +4496,17 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
             attachments[idx].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[idx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachments[idx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[idx].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            attachments[idx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
             attachments[idx].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            // References
             depth_stencil_attachment_ref[0].attachment = idx;
-            depth_stencil_attachment_ref[0].layout     = attachments[idx].initialLayout;
+            depth_stencil_attachment_ref[0].layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         }
     }
     else {
-        attachments = (VkAttachmentDescription*)calloc(color_attachment_count + depth_stencil_attachment_count, sizeof(*attachments));
+        uint32_t attachment_description_count = color_attachment_count + depth_stencil_attachment_count;
+        attachments = (VkAttachmentDescription*)calloc(attachment_description_count, sizeof(*attachments));
         assert(NULL != attachments);
         
         if (color_attachment_count > 0) {
@@ -3975,12 +4530,12 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
             attachments[ssidx].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[ssidx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachments[ssidx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[ssidx].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            attachments[ssidx].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments[ssidx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[ssidx].finalLayout    = is_swapchain ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
             // references
             color_attachment_refs[i].attachment = ssidx;
-            color_attachment_refs[i].layout     = attachments[ssidx].initialLayout;
+            color_attachment_refs[i].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
 
         // Depth stencil
@@ -3993,10 +4548,10 @@ void tr_internal_vk_create_render_pass(tr_renderer* p_renderer, tr_render_target
             attachments[idx].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[idx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachments[idx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[idx].initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            attachments[idx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
             attachments[idx].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             depth_stencil_attachment_ref[0].attachment = idx;
-            depth_stencil_attachment_ref[0].layout     = attachments[idx].initialLayout;
+            depth_stencil_attachment_ref[0].layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         }
     }
             
@@ -4062,21 +4617,35 @@ void tr_internal_vk_create_framebuffer(tr_renderer* p_renderer, tr_render_target
     assert(NULL != attachments);
 
     VkImageView* iter_attachments = attachments;
-    // Color
-    for (uint32_t i = 0; i < p_render_target->color_attachment_count; ++i) {
-        *iter_attachments = p_render_target->color_attachments[i]->vk_image_view;
-        ++iter_attachments;
-        if (p_render_target->sample_count > tr_sample_count_1) {
+    if (p_render_target->sample_count > tr_sample_count_1) {
+        for (uint32_t i = 0; i < p_render_target->color_attachment_count; ++i) {
+            // single sample
+            *iter_attachments = p_render_target->color_attachments[i]->vk_image_view;
+            ++iter_attachments;
+            // multi sample
             *iter_attachments = p_render_target->color_attachments_multisample[i]->vk_image_view;
             ++iter_attachments;
         }
     }
-    // Depth/stencil
-    if (tr_format_undefined != p_render_target->depth_stencil_format) {
-        *iter_attachments = p_render_target->depth_stencil_attachment->vk_image_view;
-        ++iter_attachments;
+    else {
+        for (uint32_t i = 0; i < p_render_target->color_attachment_count; ++i) {
+            *iter_attachments = p_render_target->color_attachments[i]->vk_image_view;
+            ++iter_attachments;
+        }
     }
 
+    // Depth/stencil
+    if (tr_format_undefined != p_render_target->depth_stencil_format) {
+        if (p_render_target->sample_count > tr_sample_count_1) {
+            *iter_attachments = p_render_target->depth_stencil_attachment_multisample->vk_image_view;
+            ++iter_attachments;
+        }
+        else {
+            *iter_attachments = p_render_target->depth_stencil_attachment->vk_image_view;
+            ++iter_attachments;
+        }
+    }
+    
     TINY_RENDERER_DECLARE_ZERO(VkFramebufferCreateInfo, create_info);
     create_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     create_info.pNext           = NULL;
@@ -4093,9 +4662,9 @@ void tr_internal_vk_create_framebuffer(tr_renderer* p_renderer, tr_render_target
     TINY_RENDERER_SAFE_FREE(attachments);
 }
 
-void tr_internal_vk_create_render_target(tr_renderer* p_renderer, tr_render_target* p_render_target)
+void tr_internal_vk_create_render_target(tr_renderer* p_renderer, bool is_swapchain, tr_render_target* p_render_target)
 {
-    tr_internal_vk_create_render_pass(p_renderer, p_render_target);
+    tr_internal_vk_create_render_pass(p_renderer, is_swapchain, p_render_target);
     tr_internal_vk_create_framebuffer(p_renderer, p_render_target);
 }
 
@@ -4118,26 +4687,31 @@ void tr_internal_vk_update_descriptor_set(tr_renderer* p_renderer, tr_descriptor
 
     // Not really efficient, just write less frequently ;)
     uint32_t write_count = 0;
-    uint32_t sampler_veww_count = 0;
-    uint32_t texture_view_count = 0;
-    uint32_t uniform_buffer_view_count = 0;
+    uint32_t sampler_view_count = 0;
+    uint32_t image_view_count = 0;
+    uint32_t buffer_view_count = 0;
     for (uint32_t descriptor_index = 0; descriptor_index < p_descriptor_set->descriptor_count; ++descriptor_index) {
         tr_descriptor* descriptor = &(p_descriptor_set->descriptors[descriptor_index]);
         switch (descriptor->type) {
             case tr_descriptor_type_sampler: {
-                sampler_veww_count += descriptor->count;
+                sampler_view_count += descriptor->count;
                 ++write_count;
             }
             break;
 
-            case tr_descriptor_type_texture: {
-                texture_view_count += descriptor->count;
+            case tr_descriptor_type_uniform_buffer_cbv:
+            case tr_descriptor_type_storage_buffer_srv:
+            case tr_descriptor_type_storage_buffer_uav:
+            case tr_descriptor_type_uniform_texel_buffer_srv:
+            case tr_descriptor_type_storage_texel_buffer_uav: {
+                buffer_view_count += descriptor->count;
                 ++write_count;
             }
             break;
 
-            case tr_descriptor_type_uniform_buffer: {
-                uniform_buffer_view_count += descriptor->count;
+            case tr_descriptor_type_texture_srv:
+            case tr_descriptor_type_texture_uav: {
+                image_view_count += descriptor->count;
                 ++write_count;
             }
             break;
@@ -4150,17 +4724,17 @@ void tr_internal_vk_update_descriptor_set(tr_renderer* p_renderer, tr_descriptor
 
     VkWriteDescriptorSet* writes = (VkWriteDescriptorSet*)calloc(write_count, sizeof(*writes));
     assert(NULL != writes);
-    VkDescriptorImageInfo* sampler_views = (VkDescriptorImageInfo*)calloc(sampler_veww_count, sizeof(*sampler_views));
+    VkDescriptorImageInfo* sampler_views = (VkDescriptorImageInfo*)calloc(sampler_view_count, sizeof(*sampler_views));
     assert(NULL != sampler_views);
-    VkDescriptorImageInfo* texture_views = (VkDescriptorImageInfo*)calloc(texture_view_count, sizeof(*sampler_views));
-    assert(NULL != texture_views);
-    VkDescriptorBufferInfo* uniform_buffer_views = (VkDescriptorBufferInfo*)calloc(uniform_buffer_view_count, sizeof(*uniform_buffer_views));
-    assert(NULL != uniform_buffer_views);
+    VkDescriptorImageInfo* image_views = (VkDescriptorImageInfo*)calloc(image_view_count, sizeof(*image_views));
+    assert(NULL != image_views);
+    VkDescriptorBufferInfo* buffer_views = (VkDescriptorBufferInfo*)calloc(buffer_view_count, sizeof(*buffer_views));
+    assert(NULL != buffer_views);
 
     uint32_t write_index = 0;
-    uint32_t sampler_veww_index = 0;
+    uint32_t sampler_view_index = 0;
     uint32_t texture_view_index = 0;
-    uint32_t uniform_buffer_view_index = 0;
+    uint32_t buffer_view_index = 0;
     for (uint32_t descriptor_index = 0; descriptor_index < p_descriptor_set->descriptor_count; ++descriptor_index) {
         tr_descriptor* descriptor = &(p_descriptor_set->descriptors[descriptor_index]);
         if ((NULL == descriptor->samplers) && (NULL == descriptor->textures) && (NULL == descriptor->uniform_buffers)) {
@@ -4178,23 +4752,93 @@ void tr_internal_vk_update_descriptor_set(tr_renderer* p_renderer, tr_descriptor
                 assert(NULL != descriptor->samplers);
 
                 writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-                writes[write_index].pImageInfo = &(sampler_views[sampler_veww_index]);
+                writes[write_index].pImageInfo = &(sampler_views[sampler_view_index]);
                 for (uint32_t i = 0; i < descriptor->count; ++i) {
-                    memcpy(&(sampler_views[sampler_veww_index]), 
+                    memcpy(&(sampler_views[sampler_view_index]), 
                            &(descriptor->samplers[i]->vk_sampler_view),
                            sizeof(descriptor->samplers[i]->vk_sampler_view));
-                    ++sampler_veww_index;
+                    ++sampler_view_index;
                 }
             }
             break;
 
-            case tr_descriptor_type_texture: {
+            case tr_descriptor_type_uniform_buffer_cbv: {
+                assert(NULL != descriptor->uniform_buffers);
+
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                writes[write_index].pBufferInfo = &(buffer_views[buffer_view_index]);
+                for (uint32_t i = 0; i < descriptor->count; ++i) {
+                    memcpy(&(buffer_views[buffer_view_index]), 
+                           &(descriptor->uniform_buffers[i]->vk_buffer_info),
+                           sizeof(descriptor->uniform_buffers[i]->vk_buffer_info));
+                    ++buffer_view_index;
+                }
+            }
+            break;
+
+            case tr_descriptor_type_storage_buffer_srv: {
+                assert(NULL != descriptor->buffers);
+
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[write_index].pBufferInfo = &(buffer_views[buffer_view_index]);
+                for (uint32_t i = 0; i < descriptor->count; ++i) {
+                    memcpy(&(buffer_views[buffer_view_index]), 
+                           &(descriptor->buffers[i]->vk_buffer_info),
+                           sizeof(descriptor->buffers[i]->vk_buffer_info));
+                    ++buffer_view_index;
+                }
+            }
+            break;
+
+            case tr_descriptor_type_storage_buffer_uav: {
+                assert(NULL != descriptor->buffers);
+
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[write_index].pBufferInfo = &(buffer_views[buffer_view_index]);
+                for (uint32_t i = 0; i < descriptor->count; ++i) {
+                    memcpy(&(buffer_views[buffer_view_index]), 
+                           &(descriptor->buffers[i]->vk_buffer_info),
+                           sizeof(descriptor->buffers[i]->vk_buffer_info));
+                    ++buffer_view_index;
+                }
+            }
+            break;
+
+            case tr_descriptor_type_uniform_texel_buffer_srv: {
+                assert(NULL != descriptor->buffers);
+
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+                writes[write_index].pBufferInfo = &(buffer_views[buffer_view_index]);
+                for (uint32_t i = 0; i < descriptor->count; ++i) {
+                    memcpy(&(buffer_views[buffer_view_index]), 
+                           &(descriptor->buffers[i]->vk_buffer_info),
+                           sizeof(descriptor->buffers[i]->vk_buffer_info));
+                    ++buffer_view_index;
+                }
+            }
+            break;
+
+            case tr_descriptor_type_storage_texel_buffer_uav: {
+                assert(NULL != descriptor->buffers);
+
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+                writes[write_index].pBufferInfo = &(buffer_views[buffer_view_index]);
+                for (uint32_t i = 0; i < descriptor->count; ++i) {
+                    memcpy(&(buffer_views[buffer_view_index]), 
+                           &(descriptor->buffers[i]->vk_buffer_info),
+                           sizeof(descriptor->buffers[i]->vk_buffer_info));
+                    ++buffer_view_index;
+                }
+            }
+            break;
+
+            case tr_descriptor_type_texture_srv: {
                 assert(NULL != descriptor->textures);
 
                 writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-                writes[write_index].pImageInfo = &(texture_views[texture_view_index]);
+                writes[write_index].pImageInfo = &(image_views[texture_view_index]);
                 for (uint32_t i = 0; i < descriptor->count; ++i) {
-                    memcpy(&(texture_views[texture_view_index]), 
+                    memcpy(&(image_views[texture_view_index]), 
                            &(descriptor->textures[i]->vk_texture_view),
                            sizeof(descriptor->textures[i]->vk_texture_view));
                     ++texture_view_index;
@@ -4202,19 +4846,20 @@ void tr_internal_vk_update_descriptor_set(tr_renderer* p_renderer, tr_descriptor
             }
             break;
 
-            case tr_descriptor_type_uniform_buffer: {
-                assert(NULL != descriptor->uniform_buffers);
+            case tr_descriptor_type_texture_uav: {
+                assert(NULL != descriptor->textures);
 
-                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                writes[write_index].pBufferInfo = &(uniform_buffer_views[uniform_buffer_view_index]);
+                writes[write_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                writes[write_index].pImageInfo = &(image_views[texture_view_index]);
                 for (uint32_t i = 0; i < descriptor->count; ++i) {
-                    memcpy(&(uniform_buffer_views[uniform_buffer_view_index]), 
-                           &(descriptor->uniform_buffers[i]->vk_buffer_view),
-                           sizeof(descriptor->uniform_buffers[i]->vk_buffer_view));
-                    ++uniform_buffer_view_index;
+                    memcpy(&(image_views[texture_view_index]), 
+                           &(descriptor->textures[i]->vk_texture_view),
+                           sizeof(descriptor->textures[i]->vk_texture_view));
+                    ++texture_view_index;
                 }
             }
             break;
+
         }
 
         ++write_index;
@@ -4226,8 +4871,8 @@ void tr_internal_vk_update_descriptor_set(tr_renderer* p_renderer, tr_descriptor
     vkUpdateDescriptorSets(p_renderer->vk_device, write_count, writes, copy_count, copies);
 
     TINY_RENDERER_SAFE_FREE(sampler_views);
-    TINY_RENDERER_SAFE_FREE(texture_views);
-    TINY_RENDERER_SAFE_FREE(uniform_buffer_views);
+    TINY_RENDERER_SAFE_FREE(image_views);
+    TINY_RENDERER_SAFE_FREE(buffer_views);
     TINY_RENDERER_SAFE_FREE(writes);
 }
 
@@ -4319,12 +4964,24 @@ void tr_internal_vk_cmd_set_viewport(tr_cmd* p_cmd, float x, float y, float widt
     assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
 
     TINY_RENDERER_DECLARE_ZERO(VkViewport, viewport);
-    viewport.x = x;
-    viewport.y = y;
-    viewport.width = width;
-    viewport.height = height;
-    viewport.minDepth = min_depth;
-    viewport.maxDepth = max_depth;
+
+    // Because some IHVs decide to implement negative viewport height differently
+    if (p_cmd->cmd_pool->renderer->vk_device_ext_VK_AMD_negative_viewport_height) {
+      viewport.x = x;
+      viewport.y = 0;
+      viewport.width = width;
+      viewport.height = -height;
+      viewport.minDepth = min_depth;
+      viewport.maxDepth = max_depth;
+    }
+    else {
+      viewport.x = x;
+      viewport.y = height;
+      viewport.width = width;
+      viewport.height = -height;
+      viewport.minDepth = min_depth;
+      viewport.maxDepth = max_depth;
+    }
     vkCmdSetViewport(p_cmd->vk_cmd_buf, 0, 1, &viewport);
 }
 
@@ -4339,6 +4996,14 @@ void tr_internal_vk_cmd_set_scissor(tr_cmd* p_cmd, uint32_t x, uint32_t y, uint3
     rect.extent.height = height;
     vkCmdSetScissor(p_cmd->vk_cmd_buf, 0, 1, &rect);
 }
+
+void tr_internal_vk_cmd_set_line_width(tr_cmd* p_cmd, float line_width)
+{
+    assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
+
+    vkCmdSetLineWidth(p_cmd->vk_cmd_buf, line_width);
+}
+
 
 void tr_cmd_internal_vk_cmd_clear_color_attachment(tr_cmd* p_cmd, uint32_t attachment_index, const tr_clear_value* clear_value)
 {
@@ -4364,19 +5029,65 @@ void tr_cmd_internal_vk_cmd_clear_color_attachment(tr_cmd* p_cmd, uint32_t attac
     vkCmdClearAttachments(p_cmd->vk_cmd_buf, 1, &attachment, 1, &rect);
 }
 
+void tr_cmd_internal_vk_cmd_clear_depth_stencil_attachment(tr_cmd* p_cmd, const tr_clear_value* clear_value)
+{
+  assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
+  assert(NULL != s_tr_internal->bound_render_target);
+
+  TINY_RENDERER_DECLARE_ZERO(VkClearAttachment, attachment);
+  attachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  attachment.clearValue.depthStencil.depth = clear_value->depth;
+  attachment.clearValue.depthStencil.stencil = clear_value->stencil;
+
+  TINY_RENDERER_DECLARE_ZERO(VkClearRect, rect);
+  rect.baseArrayLayer = 0;
+  rect.layerCount = 1;
+  rect.rect.offset.x = 0;
+  rect.rect.offset.y = 0;
+  rect.rect.extent.width = s_tr_internal->bound_render_target->width;
+  rect.rect.extent.height = s_tr_internal->bound_render_target->height;
+
+  vkCmdClearAttachments(p_cmd->vk_cmd_buf, 1, &attachment, 1, &rect);
+}
+
 void tr_internal_vk_cmd_bind_pipeline(tr_cmd* p_cmd, tr_pipeline* p_pipeline)
 {
-    assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
+    assert(p_cmd != NULL);
+    assert(p_cmd->vk_cmd_buf != VK_NULL_HANDLE);
+    assert(p_pipeline != NULL);
 
-    vkCmdBindPipeline(p_cmd->vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, p_pipeline->vk_pipeline);
+    VkPipelineBindPoint pipeline_bind_point 
+        = (p_pipeline->type == tr_pipeline_type_compute) ? VK_PIPELINE_BIND_POINT_COMPUTE
+                                                         : VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+    vkCmdBindPipeline(p_cmd->vk_cmd_buf, pipeline_bind_point, p_pipeline->vk_pipeline);
+
+    //switch (p_pipeline->type) {
+    //  case tr_pipeline_type_compute:
+    //    vkCmdBindPipeline(p_cmd->vk_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, p_pipeline->vk_pipeline);
+    //    break;
+    //  case tr_pipeline_type_graphics:
+    //    vkCmdBindPipeline(p_cmd->vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, p_pipeline->vk_pipeline);
+    //    break;
+    //  default: break;
+    //}
 }
 
 void tr_internal_vk_cmd_bind_descriptor_sets(tr_cmd* p_cmd, tr_pipeline* p_pipeline, tr_descriptor_set* p_descriptor_set)
 {
-    assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
+    assert(p_cmd != NULL);
+    assert(p_cmd->vk_cmd_buf != VK_NULL_HANDLE);
+    assert(p_pipeline != NULL);
+    assert(p_pipeline->vk_pipeline_layout != VK_NULL_HANDLE);
+    assert(p_descriptor_set != NULL);
+    assert(p_descriptor_set->vk_descriptor_set != VK_NULL_HANDLE);
+
+    VkPipelineBindPoint pipeline_bind_point 
+        = (p_pipeline->type == tr_pipeline_type_compute) ? VK_PIPELINE_BIND_POINT_COMPUTE
+                                                         : VK_PIPELINE_BIND_POINT_GRAPHICS;
 
     // @TODO: Add dynamic offsets support
-    vkCmdBindDescriptorSets(p_cmd->vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+    vkCmdBindDescriptorSets(p_cmd->vk_cmd_buf, pipeline_bind_point, 
                             p_pipeline->vk_pipeline_layout, 0, 
                             1, &(p_descriptor_set->vk_descriptor_set), 0, NULL);
 }
@@ -4423,23 +5134,179 @@ void tr_internal_vk_cmd_draw_indexed(tr_cmd* p_cmd, uint32_t index_count, uint32
     vkCmdDrawIndexed(p_cmd->vk_cmd_buf, index_count, 1, first_index, 0, 0);
 }
 
+void tr_internal_vk_cmd_buffer_transition(tr_cmd* p_cmd, tr_buffer* p_buffer, tr_buffer_usage old_usage, tr_buffer_usage new_usage)
+{
+    assert(p_cmd != NULL);
+    assert(p_cmd->vk_cmd_buf != VK_NULL_HANDLE);
+
+    VkPipelineStageFlags src_stage_mask = 0;
+    VkPipelineStageFlags dst_stage_mask = 0;
+    VkDependencyFlags dependency_flags = 0;
+    TINY_RENDERER_DECLARE_ZERO(VkBufferMemoryBarrier , barrier);
+    barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.pNext               = NULL;
+    barrier.srcQueueFamilyIndex = 0;
+    barrier.dstQueueFamilyIndex = 0;
+    barrier.buffer              = p_buffer->vk_buffer;
+    barrier.offset              = 0;
+    barrier.size                = VK_WHOLE_SIZE;
+
+    const VkPipelineStageFlags all_shader_stages =
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    switch (old_usage) {
+        case tr_buffer_usage_index: {
+            src_stage_mask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_INDEX_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_vertex: {
+            src_stage_mask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_indirect: {
+            src_stage_mask = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_transfer_src: {
+            src_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_transfer_dst: {
+            src_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_uniform_cbv: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_srv: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_uav: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        }
+        break;
+        case tr_buffer_usage_uniform_texel_srv: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_texel_uav: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        }
+        break;
+    }
+
+    switch (new_usage) {
+        case tr_buffer_usage_index: {
+            dst_stage_mask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_INDEX_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_vertex: {
+            dst_stage_mask = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_indirect: {
+            dst_stage_mask = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_transfer_src: {
+            dst_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_transfer_dst: {
+            dst_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_uniform_cbv: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_srv: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_uav: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        }
+        break;
+        case tr_buffer_usage_uniform_texel_srv: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        break;
+
+        case tr_buffer_usage_storage_texel_uav: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        }
+        break;
+    }
+
+    vkCmdPipelineBarrier(p_cmd->vk_cmd_buf,
+                         src_stage_mask,
+                         dst_stage_mask,
+                         dependency_flags,
+                         0,
+                         NULL,
+                         1,
+                         &barrier,
+                         0,
+                         NULL);
+}
+
 void tr_internal_vk_cmd_image_transition(tr_cmd* p_cmd, tr_texture* p_texture, tr_texture_usage old_usage, tr_texture_usage new_usage)
 {
     assert(VK_NULL_HANDLE != p_cmd->vk_cmd_buf);
     assert(VK_NULL_HANDLE != p_texture->vk_image);
 
-    VkPipelineStageFlags src_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkPipelineStageFlags dst_stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags src_stage_mask = 0;
+    VkPipelineStageFlags dst_stage_mask = 0;
     VkDependencyFlags dependency_flags = 0;
     TINY_RENDERER_DECLARE_ZERO(VkImageMemoryBarrier, barrier);
 
-    barrier.oldLayout = tr_util_to_vk_image_layout(old_usage);
-    barrier.newLayout = tr_util_to_vk_image_layout(new_usage);
-
     barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.pNext                           = NULL;
-    barrier.oldLayout                       = tr_util_to_vk_image_layout(old_usage);
-    barrier.newLayout                       = tr_util_to_vk_image_layout(new_usage);
+    barrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout                       = VK_IMAGE_LAYOUT_GENERAL;
     barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
     barrier.image                           = p_texture->vk_image;
@@ -4449,77 +5316,161 @@ void tr_internal_vk_cmd_image_transition(tr_cmd* p_cmd, tr_texture* p_texture, t
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount     = 1;
 
-    // oldLayout
-    switch (barrier.oldLayout) 
+    const VkPipelineStageFlags all_shader_stages =
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    // source stage/access/layout
+    switch (old_usage)
     {
-        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: {
-            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        case tr_texture_usage_undefined: {
+            src_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: {
-            barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        }
-        break;
-
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: {
-            barrier.srcAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
-        }
-        break;
-
-        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: {
+        case tr_texture_usage_transfer_src: {
+            src_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:  {
+        case tr_texture_usage_transfer_dst: {
+            src_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_PREINITIALIZED: {
-            barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        case tr_texture_usage_sampled_image: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: {
-            barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        case tr_texture_usage_storage_image: {
+            src_stage_mask = all_shader_stages;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         }
-        break;  
+        break;
+
+        case tr_texture_usage_color_attachment: {
+            src_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_depth_stencil_attachment: {
+            src_stage_mask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_resolve_src: {
+            src_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_resolve_dst: {
+            src_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_present: {
+            src_stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            barrier.srcAccessMask = 0;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        }
+        break;
     }
 
-    // newImageLayout
-    switch (barrier.newLayout) 
+    // destination stage/access/layout
+    switch (new_usage)
     {
-        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: {
-            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        case tr_texture_usage_undefined: {
+            dst_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: {
-            barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        }
-        break;
-
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: {
-            barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
-        }
-        break;
-
-        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: {
+       case tr_texture_usage_transfer_src: {
+            dst_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        }
-
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: {
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         }
         break;
 
-        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: {
-            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        case tr_texture_usage_transfer_dst: {
+            dst_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         }
-        break;                                            
-    }
+        break;
+
+        case tr_texture_usage_sampled_image: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_storage_image: {
+            dst_stage_mask = all_shader_stages;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+        break;
+
+        case tr_texture_usage_color_attachment: {
+            dst_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_depth_stencil_attachment: {
+            dst_stage_mask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_resolve_src: {
+            dst_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_resolve_dst: {
+            dst_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        break;
+
+        case tr_texture_usage_present: {
+            dst_stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            barrier.dstAccessMask = 0;
+            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        }
+        break;
+     }
 
     vkCmdPipelineBarrier(p_cmd->vk_cmd_buf,
                          src_stage_mask,
@@ -4571,6 +5522,37 @@ void tr_internal_vk_cmd_render_target_transition(tr_cmd* p_cmd, tr_render_target
     }
 }
 
+void tr_internal_vk_cmd_dispatch(tr_cmd* p_cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z)
+{
+    assert(p_cmd != NULL);
+    assert(p_cmd->vk_cmd_buf != VK_NULL_HANDLE);
+
+    vkCmdDispatch(p_cmd->vk_cmd_buf, group_count_x, group_count_y, group_count_z);
+}
+
+void tr_internal_vk_cmd_copy_buffer_to_texture2d(tr_cmd* p_cmd, uint32_t width, uint32_t height, uint32_t row_pitch, uint64_t buffer_offset, uint32_t mip_level, tr_buffer* p_buffer, tr_texture* p_texture)
+{
+    assert(p_cmd != NULL);
+    assert(p_cmd->vk_cmd_buf != VK_NULL_HANDLE);
+
+    VkBufferImageCopy regions = { 0 };
+    regions.bufferOffset                    = buffer_offset;
+    regions.bufferRowLength                 = width;
+    regions.bufferImageHeight               = height;
+    regions.imageSubresource.aspectMask     = p_texture->vk_aspect_mask;
+    regions.imageSubresource.mipLevel       = mip_level;
+    regions.imageSubresource.baseArrayLayer = 0;
+    regions.imageSubresource.layerCount     = 1;
+    regions.imageOffset.x                   = 0;
+    regions.imageOffset.y                   = 0;
+    regions.imageOffset.z                   = 0;
+    regions.imageExtent.width               = width;
+    regions.imageExtent.height              = height;
+    regions.imageExtent.depth               = 1;
+
+    vkCmdCopyBufferToImage(p_cmd->vk_cmd_buf, p_buffer->vk_buffer, p_texture->vk_image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &regions);
+}
 
 // -------------------------------------------------------------------------------------------------
 // Internal queue functions
@@ -4683,3 +5665,5 @@ void tr_internal_vk_queue_wait_idle(tr_queue* p_queue)
 #if defined(__cplusplus) && defined(TINY_RENDERER_CPP_NAMESPACE)
 } // namespace TINY_RENDERER_CPP_NAMESPACE
 #endif
+
+#endif // TINY_RENDERER_VK_H
